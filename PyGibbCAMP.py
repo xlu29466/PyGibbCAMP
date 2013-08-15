@@ -35,10 +35,8 @@ class PyGibbCAMP:
     #  @param nodeFile  A string of pathname of file containing nodes.  The 
     #                   name, type, measured
     #  @param edgeFile  A string of pathname of file containing edges
-    #  @param 
+    #  @param dataMatrixFile  A string to data
     def __init__(self, nodeFile = None, edgeFile = None, dataMatrixFile = None, perturbMatrix = None):
-        """
-        """
         self.network = None
         self.data = None
         
