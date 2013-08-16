@@ -16,3 +16,4 @@ class SigNetNode:
         return bMeasured
 
 #test comments from sjlu99
+#test 2
