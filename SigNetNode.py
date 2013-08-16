@@ -15,3 +15,4 @@ class SigNetNode:
     def isMeasured(self):
         return bMeasured
 
+#test comments from sjlu99
