@@ -29,39 +29,95 @@ import os
 #  state of POIs.
 
 
-class PyGibbCAMP:
-    
+class PyGibbCAMP:    
     ## Constructor
     #  @param nodeFile  A string of pathname of file containing nodes.  The 
     #                   name, type, measured
     #  @param edgeFile  A string of pathname of file containing edges
     #  @param dataMatrixFile  A string to data
-    def __init__(self, nodeFile = None, edgeFile = None, dataMatrixFile = None, perturbMatrix = None):
+    def __init__(self, edgeList, dataMatrixFile = None, perturbMatrix = None):
         self.network = None
         self.data = None
         
-        if nodeFile and edgeFile:
-            self.initNetwork(nodeFile, edgeFile)
+        if nodeList:
+            self.initNetwork(nodeList)
             
         if self.network and dataMatrixFile:
             self.assocData(dataMatrixFile)            
 
     
-    
-    def initNetwork(self, nodeFile, edgeFile):
-        if not nodeFile or not edgeFile:
-            raise Exception("Calling 'intiNetwork' without empty file names")
+    ## Create a network
+    #  @param  edgeList  A list of PySigNetNode objects
+    #
+    #  This function take a list of tuples consisting of a source and a sink to
+    #  create a network consisting of the nodes.  Both source and sink should
+    #  should be instances of a PySigNetNode object.  This function
+    #  create a "networkx" instance, with node indexed by the name of the nodes
+    #  and each network node is indexed by the name of the node
+    def initNetwork(self, edgeList):
+        if not nodeList:
+            raise Exception("Calling 'intiNetwork' without empty object list")
         if self.network:
             self.network.clear()
             
         self.network = nx.DiGraph()
         
-        # add nodes and edges
+        for source, sink in nodeList:
+            self.network.add_node(source.name, 'data' = source)
+            self.network.add_node(sink.name, 'data' = sink)
+            self.network.add_edge(source.name, sink.name)
             
-    def assocData(self, dataMatrixFile):
+            
+    ## Return a node object by name
+    # @param  name  The name of the node
+    def getNodeByName(self, name):
+        if name in self.network:
+            return self.network[name]['data']
+        else:
+            return None
+            
+            
+    def assocData(self, dataFileName):
         if not dataMatrixFile:
             raise Exception ("Calling 'assocData' with an empty file name")
-    
+            
+        try:
+            f = open(dataFileName)
+            lines = f.readlines()
+        except IOError:
+            print "Fail to read  file " + dataFileName
+        
+        colnames = None
+        if len(lines) == 1:  # Mac version csv, with "\r" as return
+            lines = lines[0].split("\r")
+            colnames = lines.pop(0).split(',') # split  header and extract colnames
+            map(lambda x: x.rstrip(), lines)  # remove the "\r"
+            lines = "\n".join(lines)  # use "\n" to join lines
+        else:
+            colnames = lines.pop(0).split(',')
+            lines = "".join(lines)
+            
+        # read in data and generate a numpy data matrix
+        self.data = np.genfromtxt(StringIO(lines), delimiter = ",", usecol=tuple(range(1, len(colnames))))
+            
+        #check in which column the data for a node in graph locates
+        self.dictNode2MatrixIndx = dict()  
+        for node in self.network:
+            nodeIndex = colnames.index(node)
+            if not nodeIndex:  # there is no data for the node
+                raise Exception("The data for node " + node + " is missing.  Quit!")
+            self.dictNode2MatrixIndx[node] = nodeIndex
+        
+        # find column indices for the predecessors of a node
+        self.dictParentOfNodeToMatrixIndx = dict()  # a diction of list
+        for node in self.network:
+            self.dictParentOfNodeToMatrixIndx[node] = list() 
+            preds = self.network.predecessors(node)
+
+            for p in preds:                
+                self.dictParentOfNodeToMatrixIndx[node].append(colnames.index[p])             
+                
+
     ## Add an edge between two nodes.  Can be called to perform graph search
     #  @param source  The source node of th edge
     #  @param sink    The sink node of the edge
