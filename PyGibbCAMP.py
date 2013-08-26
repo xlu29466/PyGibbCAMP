@@ -2,7 +2,13 @@
 """
 @ PyCAMP  Python Causal Modeling of Pathways, a python implmentation for modeling
 causal relationship bewtween cellular signaling proteins, particularly phosphorylated
-proteins based on reverse phase protein array (RPPA) data.
+proteins based on reverse phase protein array (RPPA) data.  This model is designed
+to model the signal transduction through series of protein phosphorylation cascade,
+in which phosphorylation of a protein often activate the protein, which in turn
+lead to phosphorylation of other proteins.  This model represent
+the phosphorylation state(s) and activation state of a protein separately such that the model
+is capable of capture the fact that, at certain time, phosphorylation of a protein
+can be decoupled by drug and inhibitors. 
 
 
 Created on Wed Aug 14 19:16:25 2013
@@ -27,18 +33,9 @@ R.library("mixtools")
 normalmixEM = R('normalmixEM')
 
 
-## Class PyCAMP
-#  This class represent the regulatory network among signaling proteins, in 
-#  particular protein kinases and their target proteins.  Given observed
-#  RPPA data, which reflect the concentration of total or phosphorylated
-#  proteins of interest in a cell population, the CAMP model represent the 
-#  observed total fluoresecent signals of POIs, the phosphorylation states of
-#  POIs, and the activation states of POIs.  The goal is to learn if a causal
-#  relationship between the activation state of a POI and the phosphorylation
-#  state of POIs.
 
 
-class PyGibbCAMP:    
+class PyGibbCAMP:  
     ## Constructor
     #  @param nodeFile  A string of pathname of file containing nodes.  The 
     #                   name, type, measured
@@ -124,53 +121,37 @@ class PyGibbCAMP:
             self.network.add_edge(source, sink)
         print "Added " + str(len(edgeLines)) + " edges.  Done with creating network"        
             
-            
+    ## Parsing data files
+    #  @param dataFileName  File name for RPPA data.  The format should be  
+    #                       a nCases * nAntibody CVS matrix file
+    #  @param perturbMatrix  File containing description of perturbation 
+    #        conditions.  The file format: each row corresponds
+    #        to a perturbation condition containing three fields:
+    #        1) canse id, which should be in the case in the data matrix 
+    #        2) perturbed protein, which should be in the node file
+    #        3) value of perturbed protein, '1' --> activation, '0' --> inactivation
     def assocData(self, dataFileName, perturbMatrix):
-        if not dataMatrixFile:
-            raise Exception ("Calling 'assocData' with an empty file name")
-            
+        # parse data mastrix by calling NamedMatrix class
+        self.data = NamedMatrix(dataFileName)
+        
         try:
-            f = open(dataFileName)
-            lines = f.readlines()
+            f = open (perturbMatrix, 'r')
+            perturbs = f.readlines()
         except IOError:
-            print "Fail to read  file " + dataFileName
-        
-        colnames = None
-        if len(lines) == 1:  # Mac version csv, with "\r" as return
-            lines = lines[0].split("\r")
-            colnames = lines.pop(0).split(',') # split  header and extract colnames
-            map(lambda x: x.rstrip(), lines)  # remove the "\r"
-            lines = "\n".join(lines)  # use "\n" to join lines
-        else:
-            colnames = lines.pop(0).split(',')
-            lines = "".join(lines)
+            print "Failed to read in perturbation data file " + perturbMatrix
             
-        # read in data and generate a numpy data matrix
-        self.data = np.genfromtxt(StringIO(lines), delimiter = ",", usecol=tuple(range(1, len(colnames))))
+        self.perturbData = list()
+        for line in perturbs:
+            case, protein, state = line.rstrip().split(',')
+            self.perturbData.append((case, protein, int(state)))
             
-        #check in which column the data for a node in graph locates
-        self.dictNode2MatrixIndx = dict()  
-        for node in self.network:
-            nodeIndex = colnames.index(node)
-            if not nodeIndex:  # there is no data for the node
-                raise Exception("The data for node " + node + " is missing.  Quit!")
-            self.dictNode2MatrixIndx[node] = nodeIndex
-        
-        # find column indices for the predecessors of a node
-        self.dictParentOfNodeToMatrixIndx = dict()  # a diction of list
-        for node in self.network:
-            self.dictParentOfNodeToMatrixIndx[node] = list() 
-            preds = self.network.predecessors(node)
-
-            for p in preds:                
-                self.dictParentOfNodeToMatrixIndx[node].append(colnames.index[p])             
-                
-
+ 
     ## Add an edge between two nodes.  Can be called to perform graph search
     #  @param source  The source node of th edge
     #  @param sink    The sink node of the edge
     def addEdge(self, source, sink):
         self.network.add_edge(source, sink)
+        
 
     ## Remove an edge between two nodes.  Can be called to perform graph search
     #  @param source  The source node of th edge
@@ -187,38 +168,61 @@ class PyGibbCAMP:
         # phosphorylation states 
         pass
     
-    
+    ## Init parameters of the model
+    #  In Bayesian network setting, the joint probability is calculated
+    #  through the product of a series conditional probability.  The parameters
+    #  of the PyCAMP model defines p(x | Pa(X)).  For observed fluorescent node
+    #  the conditional probability is a mixture of two Gaussian distribution.  
+    #  therefore, the parameters are two pairs of mu and sigma.  For
+    #  the hidden variables representing phosphorylation states and activation
+    #  states of proteins, the conditional probability is defined by a logistic
+    #  regression. Therefore, the parameters associated with such a node is a 
+    #  vector of real numbers.
+    # 
     def initParams(self):
-        """Initialize the parameter vector associated with each node 
-           with a random vector sampled from standard Gaussian.
-           
-           The parameters associated with each node for each MCMC chain is 
-           stored in two dimensional numpy array with nChain * nPredecessors 
-        """
         print "Initialize parameters associated with each node in each MCMC chain"
         for nodeId in self.network: 
-            if self.network.node[nodeId]['nodeObj'].type == 'fluorescence':                
-                # To do, init the mean and sd of fluorescence signal
-                mixGuassians = normalmixEM(self.data[:,self.dictNode2MatrixIndx[nodeId]])
-                nodeObj.mus = matlib.repmat(mixGuassian[2], self.nChain, 1)
-                nodeObj.sigmas = matlib.repmat(mixGaussian[3], self.nChains, 1)               
+            nodeObj = self.network.node[nodeId]['nodeObj']
+            if nodeObj.type == 'fluorescence':                
+                # Init the mean and sd of fluorescence signal based on observed data
+                mixGuassians = normalmixEM(self.data[:,self.dictAntiBodyNode2MatrixIndx[nodeId]])
+                nodeObj.mus = matlib.repmat(np.array(mixGuassian[2]), self.nChain, 1)
+                nodeObj.sigmas = matlib.repmat(np.array(mixGaussian[3]), self.nChains, 1)               
             else:
-                parents = self.network.predecessors(nodeId)
+                preds = self.network.predecessors(nodeId)
                 if len(parents) > 0:
-                    self.dictNodeParams[nodeId] = np.random.randn(self.nChains, len(parents) + 1)
+                    nodeObj.paramNames = preds
+                    nodeObj.params = np.random.randn(self.nChains, len(parents) + 1)
                 else:
-                    self.dictNodeParams[nodeId]  = None
+                    nodeObj.params  = None
                 
+    
+    ## Initialize latent variables
+    #    
+    #
+    def initHiddenStates(self):
+        hiddenNodes = [n for n in self.network if self.network.node[n]['nodeObj'].type != "fluorescence"]
+        nCases, nAntibody = self.data.shape()
+        caseNames = self.data.getRownames()
+        
+        self.hiddenNodeStates = list()
+        for c in range(self.nChains):
+            tmp = np.zeros((nCases, len(hiddenNodes)))
+            tmp[np.random.rand(nCases, len(hiddenNodes)) < 0.25] = 1
+            self.hiddenNodeStates.append(NamedMatrix(npMatrix = tmp, colnames = hiddenNodes, rownames = caseNames))
+        
+        
+        
+    ## Perform Gibbs sampling to perform EM inference of network model
+    def trainModelByGibbs(self, nChains = 10, alpha = 0.1, dumpFile = None):
+        self.nChains = nChains
+        
+        self.initHiddenStates()
+        self.initParams()
         
 
-    ## Perform Gibbs sampling to perform EM inference of network model
-    def trainModelByGibbs(self):
-        pass
 
-
-
-
-    def _calcNodeMarginal(self, nodeId, c):
+    def _calcNodeMarginalProb(self, nodeId, c):
         """
         Calculate the marginal probability of a node's state set to "1" 
         
@@ -229,14 +233,23 @@ class PyGibbCAMP:
         """
         nCases, nVariables = np.shape(self.data)
         
-        # collect the state of the predecessors of the node
-        predIndices = self.dictParentOfNodeToMatrixIndx[nodeId]  
         logProbOneCondOnParents = 0
         logProbZeroCondOnParents = 0
-        if len(predIndices) > 0:  # if the node has parents  
-            # calculate p(node = 1 | parents);   
-            nodeParams = self.dictNodeParams[nodeId][c,:] 
-            predStates =  np.column_stack((np.ones(nCases), self.nodeStates[c][:, predIndices])) 
+
+        # collect the state of the predecessors of the node
+        preds = self.network.predecessors(nodeId)
+        nodeObj = self.network.node[nodeId]['nodeObj']
+        
+        if len(preds) > 0:  # if the node has parents  
+            # calculate p(node = 1 | parents); 
+            if nodeObj.type == "fluorescence":
+                curNodeData = self.data.getValuesByCol(nodeId)  # a column vector of nCases
+                # calculate the probability using mixture Gaussian
+                logProbChildCondOne +=  0.5 * nodeObj.sigma[1] * np.square(childData - nodeObj.mus[1]) 
+                logProdOfChildCondZeros +=   0.5 * nodeObj.sigma[0] * np.square(childData - nodeObj.mus[0])
+                
+            nodeParams = nodeObj.params[c,:] 
+            predStates =  np.column_stack((np.ones(nCases), self.hiddenNodeStates.getValuesByCol(preds))) 
             pOneCondOnParents = 1 / (1 + np.exp( - np.dot(predStates, nodeParams)))  
             logProbOneCondOnParents  = np.log(pOneCondOnParents)
             logProbZeroCondOnParents = np.log(1 - pOneCondOnParents)
@@ -245,38 +258,37 @@ class PyGibbCAMP:
         logProbChildCondOne = 0  # the prob of child conditioning on current node == 1
         logProdOfChildCondZeros = 0
         children = self.network.successors(nodeId)
-        curNodeIndx = self.dictNode2MatrixIndx[nodeId]
+        curNodeState = self.hiddenStates.getValuesByCol(nodeId)  
 
-        if len(children) > 0:
-            for child in children:   
-                nodeObj = self.network.node[child]['nodeObj']
-                childNodeIndx = self.dictNode2MatrixIndx[child]
-                if nodeObj.type == "fluorescence":
-                    logProbChildCondOne += self.nodeStates[:,curNodeIndx] * 0.5 * nodeObj.sigma[1] * np.square(self.data[:,childNodeIndx] - nodeObj.mus[1]) 
-                    logProdOfChildCondZeros +=  (1 - self.nodeStates[:,curNodeIndx] ) * 0.5 * nodeObj.sigma[0] * np.square(self.data[:,childNodeIndx] - nodeObj.mus[0])
-                else:  
-                    # collect data and parameters associated with the node
-                    childNodeParams = self.dictNodeParams[child][c,:] 
-                    curChildStates = self.nodeStates[c][:, self.dictNode2MatrixIndx[child]]                    
-                        
-                        # find out predecessors and the position of curNode in the list
-                        childPredIndices = self.dictParentOfNodeToMatrixIndx[child] 
-                        curNodePosInPredList = childPredIndices.index(curNodeIndx)  
-        
-                    # Collect states of the predecessors of the child
-                    # Set the state of current node to ones 
-                    childPredStatesWithCurSetOne = self.nodeStates[c][:, childPredIndices]    
-                    childPredStatesWithCurSetOne[:, curNodePosInPredList] = np.ones(nCases)  
-                    childPredStatesWithCurSetOne = np.column_stack((np.ones(nCases), childPredStatesWithCurSetOne)) # padding data with a column ones as bias
-                    pChildCondCurNodeOnes = 1 / (1 + np.exp(-np.dot(childPredStatesWithCurSetOne, childNodeParams)))
-                    logProbChildCondOne += np.log (curChildStates * pChildCondCurNodeOnes + (1 - curChildStates) * (1 - pChildCondCurNodeOnes))
-        
-                    # set the state of the current node (nodeId) to zeros 
-                    childPredStatesWithCurSetZero = self.nodeStates[c][:,childPredIndices]
-                    childPredStatesWithCurSetZero [:, curNodePosInPredList] = np.zeros(nCases)
-                    childPredStatesWithCurSetZero = np.column_stack((np.ones(nCases), childPredStatesWithCurSetZero))
-                    pChildCondCurNodeZeros = 1 / (1 + np.exp(- np.dot(childPredStatesWithCurSetZero, childNodeParams))) 
-                    logProdOfChildCondZeros += np.log(curChildStates * pChildCondCurNodeZeros + (1 - curChildStates) * (1 - pChildCondCurNodeZeros))
+        for child in children:   
+            nodeObj = self.network.node[child]['nodeObj']
+            if nodeObj.type == "fluorescence":
+                childData = self.data.getValuesByCol(child)  # a column vector of nCases
+                # calculate the probability using mixture Gaussian
+                logProbChildCondOne +=  0.5 * nodeObj.sigma[1] * np.square(childData - nodeObj.mus[1]) 
+                logProdOfChildCondZeros +=   0.5 * nodeObj.sigma[0] * np.square(childData - nodeObj.mus[0])
+            else:  
+                # collect data and parameters associated with the node
+                childPreds = self.network.predecessors(child)
+                childNodeParams = nodeObj.params[c,:]
+                childPredStates = self.hiddenNodeStates[c].getValuesByCol(childPreds)
+                childPredStates = np.column_stack((np.ones(nCases), childPredStates)) # padding data with a column ones as bias
+                curChildStates = self.hiddenStates[c].getValuesByCol(child)                    
+                    
+
+                # Collect states of the predecessors of the child
+                # Set the state of current node to ones 
+                curNodePosInPredList = childPreds.index(nodeId) + 1 # offset by 1 because padding 
+
+                childPredStates[:, curNodePosInPredList] = np.ones(nCases)                
+                pChildCondCurNodeOnes = 1 / (1 + np.exp(-np.dot(childPredStatesWithCurSetOne, childNodeParams)))
+                logProbChildCondOne += np.log (curChildStates * pChildCondCurNodeOnes + (1 - curChildStates) * (1 - pChildCondCurNodeOnes))
+
+                # set the state of the current node (nodeId) to zeros 
+                childPredStates [:, curNodePosInPredList] = np.zeros(nCases)
+                pChildCondCurNodeZeros = 1 / (1 + np.exp(- np.dot(childPredStatesWithCurSetZero, childNodeParams))) 
+                logProdOfChildCondZeros += np.log(curChildStates * pChildCondCurNodeZeros + (1 - curChildStates) * (1 - pChildCondCurNodeZeros))
+
 
         # now we can calculate the marginal probability of current node 
         curNodeMarginal = 1 / (1 + np.exp(logProbZeroCondOnParents + logProdOfChildCondZeros - logProbOneCondOnParents - logProbChildCondOne))
@@ -343,7 +355,7 @@ class PyGibbCAMP:
             if len(predIndices) == 0:
                 continue
             
-            nodeIdx = self.dictNode2MatrixIndx[nodeId]
+            nodeIdx = self.dictAntiBodyNode2MatrixIndx[nodeId]
             nodeObj = self.network.node[nodeId]['nodeObj']
             
             if keepRes:
