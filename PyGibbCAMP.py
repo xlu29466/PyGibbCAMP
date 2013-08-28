@@ -20,8 +20,10 @@ import networkx as nx
 import numpy as np
 from numpy import matlib
 from rpy2 import robjects 
-import os, math, pickle
+import os, math, cPickle, re
 from SigNetNode import SigNetNode
+from StringIO import StringIO
+from NamedMatrix import NamedMatrix
 
 import rpy2.robjects.numpy2ri
 rpy2.robjects.numpy2ri.activate()   # enable directly pass numpy arrary or matrix as arguments to rpy object
@@ -74,7 +76,7 @@ class PyGibbCAMP:
         self.network = nx.DiGraph()
         
         try:
-            nf = open(nodeFileName, "r")
+            nf = open(nodeFile, "r")
             nodeLines = nf.readlines()
             nf.close()
         except IOError:
@@ -85,11 +87,11 @@ class PyGibbCAMP:
             nodeLines = nodeLines[0].split("\r")
            
         try:
-            ef = open(edgeFileName, 'r')
+            ef = open(edgeFile, 'r')
             edgeLines = ef.readlines()
             ef.close()
         except IOError:
-            print "Fail to open file " + nodeFileName
+            print "Fail to open file " + edgeFile
             return
         if len(edgeLines) == 1:
             edgeLines = edgeLines[0].split("\r")  
@@ -104,7 +106,7 @@ class PyGibbCAMP:
             protein, antibody = line.split(',')
             fluo = antibody + 'F'
             if protein not in self.network:
-                self.network.add_node(protein, nodeObj = SigNetNode(protein, 'activityState', False))
+                self.network.add_node(protein, nodeObj = SigNetNode(protein, 'activeState', False))
             self.network.add_node(antibody, nodeObj= SigNetNode(antibody, 'phosState', False))
             self.network.add_node(fluo, nodeObj = SigNetNode(fluo, 'fluorescence', True))
             self.network.add_edge(antibody, protein)
@@ -114,7 +116,7 @@ class PyGibbCAMP:
         # parse edges
         for line in edgeLines:
             #print "Current edge line: " + line
-            source, sink = line.split(',')
+            source, sink = line.rstrip().split(',')
             if source not in self.network or sink not in self.network:
                 print "Cannot add edges between nodes not in the network"
                 continue
@@ -163,10 +165,25 @@ class PyGibbCAMP:
     ## Calculate the marginal probability of observing the measured data by
     #  integrating out all possible setting of latent variable states and 
     #  model parameters.
-    def calcObservedMarginal(self):
+    def calcEvidenceLikelihood(self):
         # this can be easily achieved by taking expectation of observed 
         # phosphorylation states 
-        pass
+        loglikelihood = 0        
+        obsNodes = [n for n in self.network if self.network.node[n]['nodeObj'].bMeasured]
+        for c in range(self.nChains):
+            for nodeId in obsNodes:
+                curNodeData = self.data.getValuesByCol(nodeId)
+                pred = self.network.predecessor(nodeId)
+                predStates = self.hiddenNodeStates[c].getValuesByCol(pred)
+                nodeObj = self.network.node[nodeId]['nodeObj']
+
+                loglikelihood += sum(predStates * (np.log(nodeObj.sigma[1])\
+                + 0.5 * np.square(curNodeData - nodeObj.mus[1]) / np.square(nodeObj.sigma[1])) \
+                + (1 - predStates) *  (np.log(nodeObj.sigma[0])\
+                + 0.5 * np.square(curNodeData - nodeObj.mus[0]) / np.square(nodeObj.sigma[0])))
+        
+        loglikelihood /= self.nChains
+        
     
     ## Init parameters of the model
     #  In Bayesian network setting, the joint probability is calculated
@@ -186,13 +203,13 @@ class PyGibbCAMP:
             if nodeObj.type == 'fluorescence':                
                 # Init the mean and sd of fluorescence signal based on observed data
                 mixGuassians = normalmixEM(self.data[:,self.dictAntiBodyNode2MatrixIndx[nodeId]])
-                nodeObj.mus = matlib.repmat(np.array(mixGuassian[2]), self.nChain, 1)
-                nodeObj.sigmas = matlib.repmat(np.array(mixGaussian[3]), self.nChains, 1)               
+                nodeObj.mus = matlib.repmat(np.array(mixGuassians[2]), self.nChain, 1)
+                nodeObj.sigmas = matlib.repmat(np.array(mixGuassians[3]), self.nChains, 1)               
             else:
                 preds = self.network.predecessors(nodeId)
-                if len(parents) > 0:
+                if len(preds) > 0:
                     nodeObj.paramNames = preds
-                    nodeObj.params = np.random.randn(self.nChains, len(parents) + 1)
+                    nodeObj.params = np.random.randn(self.nChains, len(preds) + 1)
                 else:
                     nodeObj.params  = None
                 
@@ -201,7 +218,7 @@ class PyGibbCAMP:
     #    
     #
     def initHiddenStates(self):
-        hiddenNodes = [n for n in self.network if self.network.node[n]['nodeObj'].type != "fluorescence"]
+        hiddenNodes = [n for n in self.network if not self.network.node[n]['nodeObj'].bMeasured]
         nCases, nAntibody = self.data.shape()
         caseNames = self.data.getRownames()
         
@@ -214,80 +231,163 @@ class PyGibbCAMP:
         
         
     ## Perform Gibbs sampling to perform EM inference of network model
-    def trainModelByGibbs(self, nChains = 10, alpha = 0.1, dumpFile = None):
+    def trainModelByGibbs(self, nChains = 10, alpha = 0.1, nSamples = 10, pickleDumpFile = None, maxIter = 1000):
         self.nChains = nChains
+        self.alpha = alpha        
         
+        
+        # Starting EM set up Markov chains. 
         self.initHiddenStates()
         self.initParams()
         
+        self.expectedStates = list()
+        nCases, nAntibodies = np.shape(self.data)
+        hiddenNodes = [n  for n in self.network if not self.network.node[n]['nodeObj'].bMeasured] 
+        for c in range(self.nChains):                  
+            # each chain collect expected statistics of nodes from samples along the chain
+            self.expectedStates.append(np.zeros(np.shape(self.data)))
 
+        optLikelihood = float("-inf")
+        bConverged = False
+        sampleCount = 0
+        for nIter in range(maxIter):
+            # E-step of EM
+            self._updateStates()            
+            if  (nIter+1) % 2 == 0: # we collect sample every other iteration
+                sampleCount += 1
+                for c in range(self.nChains):
+                    self.expectedStates[c] = self.expectedStates[c] + self.hiddenNodeStates[c]                
+                
+            # M-step of EM.  We only update parameters after a collecting a certain number of samples
+            if sampleCount >= nSamples:
+                sampleCount = 0
+                 # take expectation of sample states
+                self.expectedStates = map(lambda x: x / nSamples, self.expectedStates)
+                self._updteParams(alpha)
+                likelihood = self.calcEvidenceLikelihood()
+                self.likelihood.append(likelihood)                 
+                # collect the current best fit models
+                if likelihood > optLikelihood:
+                    optLikelihood = likelihood
+                    if pickleDumpFile:
+                        cPickle.dump(self, open(pickleDumpFile, 'wb'))
+                    else:
+                        cPickle.dump(self, open("curBestModels-alpha" + str(alpha) + ".cpickle", 'wb'))
+                print "nIter: " + str(nIter + 1) + "; log likelihood of evidence: " + str(likelihood)                    
+                bConverged = self._checkConvergence()
+                if bConverged:
+                    print "EM converged!"
+                    break
+                
+                for c in range(self.nChains):  # clear expectedStates
+                    self.expectedStates[c] = np.zeros(np.shape(self.hiddenNodeStates))
 
-    def _calcNodeMarginalProb(self, nodeId, c):
+        return self
+        
+
+            
+    def _checkConvergence(self):
+        # To do, add convergence checking code
+        if len(self.likelihood) < 20:
+            return False
+            
+        ml = np.mean(self.likelihood[-5:-1])
+        ratio = abs(self.likelihood[-1] - ml ) / abs(ml)        
+        return ratio <= 0.001
+
+        
+    def _updateStates(self):
+        nCases, antibody = np.shape(self.data)
+        nCases, nHiddenNodes = np.shape(self.hiddenNodeStates)
+        
+        # interate through all nodes. 
+        for c in range(self.nChains):
+            for nodeId in self.network:
+                # skip observed nodes
+                if self.network.node[nodeId]['nodeObj'].bMeasured:
+                    continue
+                
+                curNodeMarginal = self.calcNodeConditionalProb(nodeId, c)
+                
+                # sample states of current node based on the prob, and update 
+                sampleState = np.zeros(nCases)
+                sampleState[curNodeMarginal >= np.random.rand(nCases)] = 1.
+                curNodeIndx = self.hiddenNodeStates[c].findColIndices(nodeId)
+                self.hiddenNodeStates[c].data[:, curNodeIndx] = sampleState
+                
+            # clamp the activationState of perturbed nodes to a fix value
+            for caseName, protein, value in self.perturbData:
+                self.hiddenNodeStates[c].data.setCellValue(caseName, protein, value)
+
+            
+    def calcNodeConditionalProb(self, nodeId, c):
         """
-        Calculate the marginal probability of a node's state set to "1" 
+        Calculate the marginal probability of a node's state set to "1" conditioning 
+        on all evidence.
         
         args:
              nodeId   A string id of the node of interest
              c        An integer indicate the chain from which the parameter 
                          vector to be used  
         """
-        nCases, nVariables = np.shape(self.data)
-        
-        logProbOneCondOnParents = 0
-        logProbZeroCondOnParents = 0
+        nodeObj = self.network.node[nodeId]['nodeObj']
+        if nodeObj.type == "fluorescence":
+            raise Exception("Call _caclNodeMarginalProb on an observed variable " + nodeId)
+
+        nCases, nAntibody = np.shape(self.data)        
 
         # collect the state of the predecessors of the node
-        preds = self.network.predecessors(nodeId)
-        nodeObj = self.network.node[nodeId]['nodeObj']
-        
+        preds = self.network.predecessors(nodeId)        
+        logProbOneCondOnParents = 0
+        logProbZeroCondOnParents = 0
         if len(preds) > 0:  # if the node has parents  
-            # calculate p(node = 1 | parents); 
-            if nodeObj.type == "fluorescence":
-                curNodeData = self.data.getValuesByCol(nodeId)  # a column vector of nCases
-                # calculate the probability using mixture Gaussian
-                logProbChildCondOne +=  0.5 * nodeObj.sigma[1] * np.square(childData - nodeObj.mus[1]) 
-                logProdOfChildCondZeros +=   0.5 * nodeObj.sigma[0] * np.square(childData - nodeObj.mus[0])
-                
+            # calculate p(curNode = 1 | parents);                 
             nodeParams = nodeObj.params[c,:] 
             predStates =  np.column_stack((np.ones(nCases), self.hiddenNodeStates.getValuesByCol(preds))) 
-            pOneCondOnParents = 1 / (1 + np.exp( - np.dot(predStates, nodeParams)))  
+            pOneCondOnParents = 1 / (1 + np.exp( - np.dot(predStates, nodeParams)))
+            pOneCondOnParents[pOneCondOnParents == 1] -= np.finfo(np.float).eps
+            pOneCondOnParents[pOneCondOnParents == 0] += np.finfo(np.float).eps
             logProbOneCondOnParents  = np.log(pOneCondOnParents)
             logProbZeroCondOnParents = np.log(1 - pOneCondOnParents)
 
-        # collect  evidence from all children 
+        # collect  evidence from  children 
         logProbChildCondOne = 0  # the prob of child conditioning on current node == 1
         logProdOfChildCondZeros = 0
+        
         children = self.network.successors(nodeId)
-        curNodeState = self.hiddenStates.getValuesByCol(nodeId)  
-
-        for child in children:   
-            nodeObj = self.network.node[child]['nodeObj']
-            if nodeObj.type == "fluorescence":
-                childData = self.data.getValuesByCol(child)  # a column vector of nCases
-                # calculate the probability using mixture Gaussian
-                logProbChildCondOne +=  0.5 * nodeObj.sigma[1] * np.square(childData - nodeObj.mus[1]) 
-                logProdOfChildCondZeros +=   0.5 * nodeObj.sigma[0] * np.square(childData - nodeObj.mus[0])
-            else:  
-                # collect data and parameters associated with the node
-                childPreds = self.network.predecessors(child)
-                childNodeParams = nodeObj.params[c,:]
-                childPredStates = self.hiddenNodeStates[c].getValuesByCol(childPreds)
-                childPredStates = np.column_stack((np.ones(nCases), childPredStates)) # padding data with a column ones as bias
-                curChildStates = self.hiddenStates[c].getValuesByCol(child)                    
+        if len(children) > 0:
+            for child in children:   
+                nodeObj = self.network.node[child]['nodeObj']
+                if nodeObj.type == "fluorescence":
+                    curChildData = self.data.getValuesByCol(child)  
+                    # calculate the probability using mixture Gaussian
+                    logProbChildCondOne +=  (np.log(nodeObj.sigma[1]) + 0.5 * np.square(curChildData - nodeObj.mus[1]) / np.square(nodeObj.sigma[1])) 
+                    logProdOfChildCondZeros += (np.log(nodeObj.sigma[0]) + 0.5 * np.square(curChildData - nodeObj.mus[0]) / np.square(nodeObj.sigma[0])) 
                     
-
-                # Collect states of the predecessors of the child
-                # Set the state of current node to ones 
-                curNodePosInPredList = childPreds.index(nodeId) + 1 # offset by 1 because padding 
-
-                childPredStates[:, curNodePosInPredList] = np.ones(nCases)                
-                pChildCondCurNodeOnes = 1 / (1 + np.exp(-np.dot(childPredStatesWithCurSetOne, childNodeParams)))
-                logProbChildCondOne += np.log (curChildStates * pChildCondCurNodeOnes + (1 - curChildStates) * (1 - pChildCondCurNodeOnes))
-
-                # set the state of the current node (nodeId) to zeros 
-                childPredStates [:, curNodePosInPredList] = np.zeros(nCases)
-                pChildCondCurNodeZeros = 1 / (1 + np.exp(- np.dot(childPredStatesWithCurSetZero, childNodeParams))) 
-                logProdOfChildCondZeros += np.log(curChildStates * pChildCondCurNodeZeros + (1 - curChildStates) * (1 - pChildCondCurNodeZeros))
+                else:  # current child is a latent variable
+                    # collect data and parameters associated with the node
+                    curChildStates = self.hiddenStates[c].getValuesByCol(child)                    
+                    
+                    # Collect states of the predecessors of the child
+                    childPreds = self.network.predecessors(child)
+                    childNodeParams = nodeObj.params[c,:]
+                    childPredStates = self.hiddenNodeStates[c].getValuesByCol(childPreds)
+                    childPredStates = np.column_stack((np.ones(nCases), childPredStates)) # padding data with a column ones as bias
+                    
+                    # Set the state of current node to ones 
+                    curNodePosInPredList = childPreds.index(nodeId) + 1 # offset by 1 because padding 
+                    childPredStates[:, curNodePosInPredList] = np.ones(nCases)                
+                    pChildCondCurNodeOnes = 1 / (1 + np.exp(-np.dot(childPredStates, childNodeParams)))
+                    pChildCondCurNodeOnes[pChildCondCurNodeOnes==1] -= np.finfo(np.float).eps
+                    pChildCondCurNodeOnes[pChildCondCurNodeOnes==0] += np.finfo(np.float).eps
+                    logProbChildCondOne += np.log (curChildStates * pChildCondCurNodeOnes + (1 - curChildStates) * (1 - pChildCondCurNodeOnes))
+                    
+                    # set the state of the current node (nodeId) to zeros 
+                    childPredStates [:, curNodePosInPredList] = np.zeros(nCases)
+                    pChildCondCurNodeZeros = 1 / (1 + np.exp(- np.dot(childPredStates, childNodeParams))) 
+                    pChildCondCurNodeZeros[pChildCondCurNodeZeros==1]  -= np.finfo(np.float).eps
+                    pChildCondCurNodeZeros[pChildCondCurNodeZeros==0]  += np.finfo(np.float).eps
+                    logProdOfChildCondZeros += np.log(curChildStates * pChildCondCurNodeZeros + (1 - curChildStates) * (1 - pChildCondCurNodeZeros))
 
 
         # now we can calculate the marginal probability of current node 
@@ -300,7 +400,9 @@ class PyGibbCAMP:
             Return the first column of 'beta' matrix of the glmnet object 
             with all none zero values returned by the glmnet
             """
-                    
+        # read in intercept
+        a0 = glmnet_res.rx('a0')
+        
         # Read in lines of beta matrix txt, which is a nVariables * nLambda.
         # Since we call glmnet by padding x with a column of 1s, we only work
         # with the 'beta' matrix returned by fit
@@ -340,22 +442,22 @@ class PyGibbCAMP:
         # scan through the beta matrix and return the first all none zero 
         # or the last column                    
         for j in range(nLambda):
-            if not np.any(betaMatrix[:, j] == 0.):
+            if sum(betaMatrix[:, j]) >= 3:
                 break
         
-        return betaMatrix[:,j]        
+        return np.copyto(a0[j], betaMatrix[:,j])        
       
         
-    def _updteParams(self, alpha = 0.05, keepRes = False):
+    def _updteParams(self, alpha = 0.05):
         # Update the parameter associated with each node, p(n | Pa(n)) using logistic regression,
         # using expected states of precessors as X and current node states acrss samples as y
         nCases, nVariables = np.shape(self.data)
         for nodeId in self.network:
-            predIndices = self.dictParentOfNodeToMatrixIndx[nodeId]
-            if len(predIndices) == 0:
+            preds = self.network.predecessors(nodeId)
+            predIndices = self.hiddenNodeStates[0].findColIndices(preds)
+            if len(preds) == 0:
                 continue
             
-            nodeIdx = self.dictAntiBodyNode2MatrixIndx[nodeId]
             nodeObj = self.network.node[nodeId]['nodeObj']
             
             if keepRes:
@@ -366,12 +468,12 @@ class PyGibbCAMP:
                 curNodeData = self.data[:,nodeIdx]
                 if self.network.node[nodeId]['nodeObj'].type == "fluorescence":
                     nodeObj.mus[c,0] = np.mean ((1-expectedPredState) * curNodeData)
-                    nodeObj.mus[c, 0] = np.std ((1-expectedPredState) * curNodeData)
-                    nodeObj.sigmas[c, 1] = np.mean (expectedPredState * curNodeData)
-                    nodeObj.sigmas[c, 1] = np.mean (expectedPredState * curNodeData)
-                
+                    nodeObj.sigma[c, 0] = np.std ((1-expectedPredState) * curNodeData)
+                    nodeObj.mus[c, 1] = np.mean (expectedPredState * curNodeData)
+                    nodeObj.sigmas[c, 1] = np.std (expectedPredState * curNodeData)                
                 else:   
-                    x = np.column_stack((np.ones(nCases), expectedPredState))
+                    #x = np.column_stack((np.ones(nCases), expectedPredState))
+                    x =  expectedPredState
                     y = self.nodeStates[c][:, nodeIdx]
                     
                     #check if all x and y are of same value, which will lead to problem for glmnet
@@ -393,26 +495,15 @@ class PyGibbCAMP:
                     
                 
                     # call logistic regression using glmnet from Rpy
-                    fit = glmnet (x, y, alpha = .05, family = "binomial", intercept = 0)
+                    fit = glmnet (x, y, alpha = alpha, family = "binomial")
                     # extract coefficients from Rpy2 vector object
-                    self.dictNodeParams[nodeId][c,:] = self.parseGlmnetCoef(fit) 
-                    
-                    if keepRes:
-                        self.network.node[nodeId]['nodeObj'].fitResults.append(fit)
-        
-                
-                
-    
-    ## Gibbs sampling to update latent variables
-    def _updateLatentByGibbs(self):
-        pass
-    
-    ## Inference of model parameters through logistic regression 
-    def _updateParams(self):
-        pass
-    
-    
+                    self.dictNodeParams[nodeId][c,:] = self.parseGlmnetCoef(fit)
+                    self.network.node[nodeId]['nodeObj'].fitResults.append(fit)
+
+
+  
     def toXGMML(self):
+        pass
     
     
     
