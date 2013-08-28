@@ -231,10 +231,19 @@ class PyGibbCAMP:
         
         
     ## Perform Gibbs sampling to perform EM inference of network model
-    def trainModelByGibbs(self, nChains = 10, alpha = 0.1, nSamples = 10, pickleDumpFile = None, maxIter = 1000):
+    #  
+    #   @param nChains  The number of Markov chains in the model
+    #   @alpha  The 'alpha' parameter, which will be used to train glmnet model for logistic regression
+    #   @nSamples  The number of samples to collect before EM update parameters
+    #   @pickleDumpFile The file name to save the best model while training
+    #   @maxIter  The number of maximal interation to train the model
+    #
+    #  This is the main function of the class, which handles all training aspects
+    #  
+    def train(self, nChains = 10, alpha = 0.1, nSamples = 10, pickleDumpFile = None, maxIter = 1000):
         self.nChains = nChains
-        self.alpha = alpha        
-        
+        self.alpha = alpha  
+        self.likelihood = list()
         
         # Starting EM set up Markov chains. 
         self.initHiddenStates()
@@ -247,10 +256,15 @@ class PyGibbCAMP:
             # each chain collect expected statistics of nodes from samples along the chain
             self.expectedStates.append(np.zeros(np.shape(self.data)))
 
+        print "Starting EM: alpha = " + str(alpha) + "; nChains = " + str(nChains) + "; nSamples = " + str (nSamples)
         optLikelihood = float("-inf")
         bConverged = False
         sampleCount = 0
         for nIter in range(maxIter):
+            likelihood = self.calcEvidenceLikelihood()
+            print "nIter: " + str(nIter ) + "; log likelihood of evidence: " + str(likelihood)
+            self.likelihood.append(likelihood)
+            
             # E-step of EM
             self._updateStates()            
             if  (nIter+1) % 2 == 0: # we collect sample every other iteration
@@ -264,8 +278,11 @@ class PyGibbCAMP:
                  # take expectation of sample states
                 self.expectedStates = map(lambda x: x / nSamples, self.expectedStates)
                 self._updteParams(alpha)
+                
                 likelihood = self.calcEvidenceLikelihood()
-                self.likelihood.append(likelihood)                 
+                self.likelihood.append(likelihood)   
+                print "nIter: " + str(nIter + 1) + "; log likelihood of evidence: " + str(likelihood)                    
+
                 # collect the current best fit models
                 if likelihood > optLikelihood:
                     optLikelihood = likelihood
@@ -273,7 +290,6 @@ class PyGibbCAMP:
                         cPickle.dump(self, open(pickleDumpFile, 'wb'))
                     else:
                         cPickle.dump(self, open("curBestModels-alpha" + str(alpha) + ".cpickle", 'wb'))
-                print "nIter: " + str(nIter + 1) + "; log likelihood of evidence: " + str(likelihood)                    
                 bConverged = self._checkConvergence()
                 if bConverged:
                     print "EM converged!"
@@ -298,7 +314,7 @@ class PyGibbCAMP:
         
     def _updateStates(self):
         nCases, antibody = np.shape(self.data)
-        nCases, nHiddenNodes = np.shape(self.hiddenNodeStates)
+        nCases, nHiddenNodes = np.shape(self.hiddenNodeStates[0])
         
         # interate through all nodes. 
         for c in range(self.nChains):
