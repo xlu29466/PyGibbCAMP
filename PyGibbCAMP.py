@@ -100,10 +100,15 @@ class PyGibbCAMP:
         self.network = nx.DiGraph()
         print "Creating network"
 
+        self.dictProteinToAntibody = dict()
         # parse nodes
         for line in nodeLines:
             #print line
             protein, antibody = line.split(',')
+            if protein not in self.dictProteinToAntibody:
+                self.dictProteinToAntibody[protein] = []
+            self.dictProteinToAntibody[protein].append(antibody)
+            
             fluo = antibody + 'F'
             if protein not in self.network:
                 self.network.add_node(protein, nodeObj = SigNetNode(protein, 'activeState', False))
@@ -117,11 +122,16 @@ class PyGibbCAMP:
         for line in edgeLines:
             #print "Current edge line: " + line
             source, sink = line.rstrip().split(',')
-            if source not in self.network or sink not in self.network:
+            if source not in self.dictProteinToAntibody or sink not in self.network:
                 print "Cannot add edges between nodes not in the network"
                 continue
-            self.network.add_edge(source, sink)
-        print "Added " + str(len(edgeLines)) + " edges.  Done with creating network"        
+            if self.network.node[sink]['nodeObj'].type == "phosState":
+                self.network.add_edge(source, sink)
+            else:
+                for ab in self.dictProteinToAntibody[source]:
+                    self.network.add_edge(source, ab)
+        print "Added " + str(len(edgeLines)) + " edges.  Done with creating network"  
+        
             
     ## Parsing data files
     #  @param dataFileName  File name for RPPA data.  The format should be  
@@ -162,29 +172,6 @@ class PyGibbCAMP:
         self.network.remove_edge(source, sink)
         
         
-    ## Calculate the marginal probability of observing the measured data by
-    #  integrating out all possible setting of latent variable states and 
-    #  model parameters.
-    def calcEvidenceLikelihood(self):
-        # this can be easily achieved by taking expectation of observed 
-        # phosphorylation states 
-        loglikelihood = 0        
-        obsNodes = [n for n in self.network if self.network.node[n]['nodeObj'].bMeasured]
-        for c in range(self.nChains):
-            for nodeId in obsNodes:
-                curNodeData = self.data.getValuesByCol(nodeId)
-                pred = self.network.predecessor(nodeId)
-                predStates = self.hiddenNodeStates[c].getValuesByCol(pred)
-                nodeObj = self.network.node[nodeId]['nodeObj']
-
-                loglikelihood += sum(predStates * (np.log(nodeObj.sigma[1])\
-                + 0.5 * np.square(curNodeData - nodeObj.mus[1]) / np.square(nodeObj.sigma[1])) \
-                + (1 - predStates) *  (np.log(nodeObj.sigma[0])\
-                + 0.5 * np.square(curNodeData - nodeObj.mus[0]) / np.square(nodeObj.sigma[0])))
-        
-        loglikelihood /= self.nChains
-        
-    
     ## Init parameters of the model
     #  In Bayesian network setting, the joint probability is calculated
     #  through the product of a series conditional probability.  The parameters
@@ -201,8 +188,9 @@ class PyGibbCAMP:
         for nodeId in self.network: 
             nodeObj = self.network.node[nodeId]['nodeObj']
             if nodeObj.type == 'fluorescence':                
-                # Init the mean and sd of fluorescence signal based on observed data
-                mixGuassians = normalmixEM(self.data[:,self.dictAntiBodyNode2MatrixIndx[nodeId]])
+                # Estimate mean and sd of fluo signal using mixture model
+                mixGuassians = normalmixEM(self.data.getValuesByCol(nodeId))
+                # mus and sigmas are represented as nChain x 2 matrices
                 nodeObj.mus = matlib.repmat(np.array(mixGuassians[2]), self.nChain, 1)
                 nodeObj.sigmas = matlib.repmat(np.array(mixGuassians[3]), self.nChains, 1)               
             else:
@@ -228,6 +216,28 @@ class PyGibbCAMP:
             tmp[np.random.rand(nCases, len(hiddenNodes)) < 0.25] = 1
             self.hiddenNodeStates.append(NamedMatrix(npMatrix = tmp, colnames = hiddenNodes, rownames = caseNames))
         
+        
+    ## Calculate the marginal probability of observing the measured data by
+    #  integrating out all possible setting of latent variable states and 
+    #  model parameters.
+    def calcEvidenceLikelihood(self):
+        # this can be easily achieved by taking expectation of observed 
+        # phosphorylation states 
+        loglikelihood = 0        
+        obsNodes = [n for n in self.network if self.network.node[n]['nodeObj'].bMeasured]
+        for c in range(self.nChains):
+            for nodeId in obsNodes:
+                curNodeData = self.data.getValuesByCol(nodeId)
+                pred = self.network.predecessors(nodeId)
+                predStates = self.hiddenNodeStates[c].getValuesByCol(pred)
+                nodeObj = self.network.node[nodeId]['nodeObj']
+
+                loglikelihood += sum(- predStates * (np.log(nodeObj.sigma[c, 1])\
+                + 0.5 * np.square(curNodeData - nodeObj.mus[c, 1]) / np.square(nodeObj.sigma[c, 1])) \
+                + (1 - predStates) *  (- np.log(nodeObj.sigma[c, 0])\
+                + 0.5 * np.square(curNodeData - nodeObj.mus[c, 0]) / np.square(nodeObj.sigma[c, 0])))
+        
+        loglikelihood /= self.nChains
         
         
     ## Perform Gibbs sampling to perform EM inference of network model
@@ -323,7 +333,7 @@ class PyGibbCAMP:
                 if self.network.node[nodeId]['nodeObj'].bMeasured:
                     continue
                 
-                curNodeMarginal = self.calcNodeConditionalProb(nodeId, c)
+                curNodeMarginal = self.calcNodeCondProb(nodeId, c)
                 
                 # sample states of current node based on the prob, and update 
                 sampleState = np.zeros(nCases)
@@ -334,9 +344,11 @@ class PyGibbCAMP:
             # clamp the activationState of perturbed nodes to a fix value
             for caseName, protein, value in self.perturbData:
                 self.hiddenNodeStates[c].data.setCellValue(caseName, protein, value)
+                
+            # To do:  need to represent perturbation as nodes in network, 
 
             
-    def calcNodeConditionalProb(self, nodeId, c):
+    def calcNodeCondProb(self, nodeId, c):
         """
         Calculate the marginal probability of a node's state set to "1" conditioning 
         on all evidence.
@@ -377,8 +389,8 @@ class PyGibbCAMP:
                 if nodeObj.type == "fluorescence":
                     curChildData = self.data.getValuesByCol(child)  
                     # calculate the probability using mixture Gaussian
-                    logProbChildCondOne +=  (np.log(nodeObj.sigma[1]) + 0.5 * np.square(curChildData - nodeObj.mus[1]) / np.square(nodeObj.sigma[1])) 
-                    logProdOfChildCondZeros += (np.log(nodeObj.sigma[0]) + 0.5 * np.square(curChildData - nodeObj.mus[0]) / np.square(nodeObj.sigma[0])) 
+                    logProbChildCondOne +=  (- np.log( nodeObj.sigma[c, 1]) + 0.5 * np.square(curChildData - nodeObj.mus[c, 1]) / np.square(nodeObj.sigma[c,1])) 
+                    logProdOfChildCondZeros += (- np.log( nodeObj.sigma[c, 0]) + 0.5 * np.square(curChildData - nodeObj.mus[c, 0]) / np.square(nodeObj.sigma[c,0])) 
                     
                 else:  # current child is a latent variable
                     # collect data and parameters associated with the node
@@ -414,9 +426,9 @@ class PyGibbCAMP:
     def parseGlmnetCoef(self, glmnet_res):        
         """ Parse the 'beta' matrix returned by calling glmnet through RPy2.
             Return the first column of 'beta' matrix of the glmnet object 
-            with all none zero values returned by the glmnet
+            with 3 or more non-zero values 
             """
-        # read in intercept
+        # read in intercept; a vector of length of nLambda
         a0 = glmnet_res.rx('a0')
         
         # Read in lines of beta matrix txt, which is a nVariables * nLambda.
@@ -474,14 +486,11 @@ class PyGibbCAMP:
             if len(preds) == 0:
                 continue
             
-            nodeObj = self.network.node[nodeId]['nodeObj']
-            
-            if keepRes:
-                self.network.node[nodeId]['nodeObj'].fitResults = []
-
+            nodeObj = self.network.node[nodeId]['nodeObj']            
+            nodeObj.fitResults = []
             for c in range(self.nChains): 
                 expectedPredState = self.expectedStates[c][:, predIndices]
-                curNodeData = self.data[:,nodeIdx]
+                curNodeData = self.data.getValuesByCol(nodeId)
                 if self.network.node[nodeId]['nodeObj'].type == "fluorescence":
                     nodeObj.mus[c,0] = np.mean ((1-expectedPredState) * curNodeData)
                     nodeObj.sigma[c, 0] = np.std ((1-expectedPredState) * curNodeData)
@@ -490,20 +499,20 @@ class PyGibbCAMP:
                 else:   
                     #x = np.column_stack((np.ones(nCases), expectedPredState))
                     x =  expectedPredState
-                    y = self.nodeStates[c][:, nodeIdx]
+                    y = self.hiddenNodeStates.getValuesByCol(nodeId) 
                     
                     #check if all x and y are of same value, which will lead to problem for glmnet
                     rIndx = map(lambda z: int(math.floor(z)), np.random.rand(3) * nCases)
-                    if sum(y) == nCases:                        
+                    if sum(y) == nCases:  # if every y == 1                      
                         y[rIndx] = 0                        
                     elif sum( map(lambda x: 1 - x, y)) == nCases:
                         y[rIndx] = 1        
                     y = robjects.vectors.IntVector(y)
                 
-                    allOnes = np.where(np.sum(x[:, 1:nVariables],0) == nCases)
-                    for c in allOnes[0]:
+                    allRwoSumOnes = np.where(np.sum(x, 0) == nCases)[0]
+                    for c in allRwoSumOnes:
                         rIndx = map(lambda z: int(math.floor(z)), np.random.rand(3) * nCases)
-                        x[rIndx, c+1] = 0 
+                        x[rIndx, c] = 0 
                     allZeros = np.where(np.sum(np.ones(np.shape(x)) - x, 0) == nCases) 
                     for c in allZeros[0]:
                         rIndx = map(lambda z: int(math.floor(z)), np.random.rand(3) * nCases)
@@ -513,8 +522,8 @@ class PyGibbCAMP:
                     # call logistic regression using glmnet from Rpy
                     fit = glmnet (x, y, alpha = alpha, family = "binomial")
                     # extract coefficients from Rpy2 vector object
-                    self.dictNodeParams[nodeId][c,:] = self.parseGlmnetCoef(fit)
-                    self.network.node[nodeId]['nodeObj'].fitResults.append(fit)
+                    nodeObj.params[c,:] = self.parseGlmnetCoef(fit)
+                    nodeObj.fitResults.append(fit)
 
 
   
