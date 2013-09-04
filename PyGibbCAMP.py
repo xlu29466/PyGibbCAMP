@@ -49,6 +49,11 @@ class PyGibbCAMP:
         self.data = None
         self.nChains = 1
         
+        self.dictPerturbEffect = { 'TR.GSK690693.Inhibitors' : ('AKT1',	0), \
+        'TR.GSK690693_GSK1120212.Inhibitors' : [('AKT1', 0), ('MAP2K1', 0)],\
+        'TR.EGF.Stimuli' : ('EGFR', 1), 'TR.FGF1.Stimuli': ('EGFR', 1)}
+
+        
         if nodeFile and edgeFile:
             self.initNetwork(nodeFile, edgeFile)
             
@@ -133,7 +138,18 @@ class PyGibbCAMP:
             else: # both source and sink are proteins, 
                 for ab in self.dictProteinToAntibody[sink]: # look up antibodies of sink
                     self.network.add_edge(source, ab)
-        print "Added " + str(len(edgeLines)) + " edges.  Done with creating network"  
+                    
+        cycles = nx.simple_cycles(self.network)
+        for cyc in cycles:
+            if len(cyc) == 4:  #a cycle involve 2, cut one protein to antibody edge  
+                for n in cyc:
+                    if self.network.node[n]['nodeObj'].type == 'activeState':
+                        for child in self.network.successors(n):
+                            if child in cyc:
+                                self.network.remove_edge(n, child)
+                                break
+                
+        print "Added " + str(len(self.network.edges())) + " edges. "  
         
             
     ## Parsing data files
@@ -145,38 +161,15 @@ class PyGibbCAMP:
     #        1) canse id, which should be in the case in the data matrix 
     #        2) perturbed protein, which should be in the node file
     #        3) value of perturbed protein, '1' --> activation, '0' --> inactivation
-    def assocData(self, dataFileName, perturbMatrix):
+    def assocData(self, dataFileName, perturbMatrix, missingDataMatrix):
         # parse data mastrix by calling NamedMatrix class
         self.data = NamedMatrix(dataFileName)
         self.dataFileName = dataFileName
         
-        try:
-            f = open (perturbMatrix, 'r')
-            perturbs = f.readlines()
-        except IOError:
-            print "Failed to read in perturbation data file " + perturbMatrix
-            
-        self.perturbData = dict()
-        for line in perturbs:
-            case, protein, state = line.rstrip().split(',')
-            if protein not in self.perturbData:
-                self.perturbData[protein] = []
-                self.perturbData[protein].append((case, int(state)))
-            
- 
-    ## Add an edge between two nodes.  Can be called to perform graph search
-    #  @param source  The source node of th edge
-    #  @param sink    The sink node of the edge
-    def addEdge(self, source, sink):
-        self.network.add_edge(source, sink)
-        
+        self.perturbData = NamedMatrix(perturbMatrix)
+        self.missingDataMatrix = NamedMatrix(missingDataMatrix)
+           
 
-    ## Remove an edge between two nodes.  Can be called to perform graph search
-    #  @param source  The source node of th edge
-    #  @param sink    The sink node of the edge        
-    def removeEdge(self, source, sink):
-        self.network.remove_edge(source, sink)
-        
         
     ## Init parameters of the model
     #  In Bayesian network setting, the joint probability is calculated
@@ -198,7 +191,11 @@ class PyGibbCAMP:
         nodeObj = self.network.node[nodeId]['nodeObj']
         if nodeObj.type == 'fluorescence':                
             # Estimate mean and sd of fluo signal using mixture model
-            mixGuassians = normalmixEM(self.data.getValuesByCol(nodeId))
+            if nodeId in self.missingDataMatrix.getColnames():
+                nodeData = self.data.getValuesByCol(self.missingDataMatrix[:,nodeId] == 0, nodeId)
+            else:
+                nodeData = self.data.getValuesByCol(nodeId)
+            mixGuassians = normalmixEM(nodeData)
             # mus and sigmas are represented as nChain x 2 matrices
             nodeObj.mus = matlib.repmat(np.array(mixGuassians[2]), self.nChain, 1)
             nodeObj.sigmas = matlib.repmat(np.array(mixGuassians[3]), self.nChains, 1)               
@@ -247,6 +244,8 @@ class PyGibbCAMP:
                 + 0.5 * np.square(curNodeData - nodeObj.mus[c, 0]) / np.square(nodeObj.sigma[c, 0])))
         
         loglikelihood /= self.nChains
+            
+        
         
     ## Perform graph search
     def train(self, nChains = 10, alpha = 0.2, nParents = 4, nSamples = 10, pickleDumpFile = None, maxIter = 1000):
@@ -279,9 +278,9 @@ class PyGibbCAMP:
             corrIsorted.pop(0)  #correlation with self 
             # foreach node, we consider 3 top correlated as potential parents
             
-            for j in range(3): 
+            for j in range(5): 
                 cycleEdge = None
-                currLikelihood = np.mean(self.liklihood[-6:-1])
+                currLikelihood = np.mean(self.liklihood[-5:-1])
                 indxJ = corrI.index(corrIsorted[j])
                 antibodyJ = self.data.getColnames()[indxJ]
                 proteinJ = self.dictAntibodyToProtein[antibodyJ]
@@ -294,7 +293,7 @@ class PyGibbCAMP:
 
                 self._initNodeParams(antibodyI)
                 self._gibbsEM(100)
-                newLikelihood = np.mean(self.liklihood[-6:-1])
+                newLikelihood = np.mean(self.liklihood[-5:-1])
                 if (newLikelihood - currLikelihood)  < 0:
                     self.network.remove_edge(proteinJ, antibodyI)
                     if cycleEdge:
@@ -389,6 +388,7 @@ class PyGibbCAMP:
             for nodeId in self.network:
                 # skip observed nodes
                 if self.network.node[nodeId]['nodeObj'].bMeasured:
+                    #check if observed variables has missing values
                     continue
                 
                 curNodeMarginal = self.calcNodeCondProb(nodeId, c)
