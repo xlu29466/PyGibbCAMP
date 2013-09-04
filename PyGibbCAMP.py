@@ -44,66 +44,50 @@ class PyGibbCAMP:
     #  @param edgeFile  A list of tuples, each containing a source and sink node 
     #                   of an edge
     #  @param dataMatrixFile  A string to data
-    def __init__(self, nodeFile = None, edgeFile = None, dataMatrixFile = None, perturbMatrix = None):
+    def __init__(self, nodeFile , dataMatrixFile , perturbMatrix = None, missingDataMatrix=None):
         self.network = None
-        self.data = None
+        self.obsData = None
+        self.perturbInstances = None
         self.nChains = 1
         
         self.dictPerturbEffect = { 'TR.GSK690693.Inhibitors' : ('AKT1',	0), \
         'TR.GSK690693_GSK1120212.Inhibitors' : [('AKT1', 0), ('MAP2K1', 0)],\
         'TR.EGF.Stimuli' : ('EGFR', 1), 'TR.FGF1.Stimuli': ('EGFR', 1)}
 
+        # parse data mastrix by calling NamedMatrix class
+        if not dataMatrixFile:
+            raise Exception("Cannot create PyCAMP obj without 'dataMatrixFile'")
+            return
+        self.obsData = NamedMatrix(dataMatrixFile)
+        self.obsDataFileName = dataMatrixFile
         
-        if nodeFile and edgeFile:
-            self.initNetwork(nodeFile, edgeFile)
+        if perturbMatrix:        
+            self.perturbData = NamedMatrix(perturbMatrix)
+            perturbInstances = self.perturbationMatrix.getColnames()
             
-        if self.network and dataMatrixFile and perturbMatrix:
-            self.assocData(dataMatrixFile, perturbMatrix)            
+            # concatenate perturbation data to observed data
+            self.obsData.data = np.column_stack((self.obsData.data, self.perturbData.data))
+            self.obsData.colnames = self.obsData.colnames + self.perturbData.colnames
+        
+        if missingDataMatrix:
+            self.missingDataMatrix = NamedMatrix(missingDataMatrix)
 
-    
-    ## Create a network
-    #  @param  edgeList  A list of PySigNetNode objects
-    #
-    #  This function take a list of tuples consisting of a source and a sink to
-    #  create a network consisting of the nodes.  Both source and sink should
-    #  should be instances of a PySigNetNode object.  This function
-    #  create a "networkx" instance, with node indexed by the name of the nodes
-    #  and each network node is indexed by the name of the node
-    def initNetwork(self, nodeFile, edgeFile):
         if not nodeFile:
             raise Exception("Calling 'intiNetwork' with empty nodeFile name")
-        if not edgeFile:
-            raise Exception("Calling 'initNetwork' with empty edge file" )
-            
-        if self.network:
-            self.network.clear()
-            
-        self.network = nx.DiGraph()
-        
+            return
+
         try:
             nf = open(nodeFile, "r")
             nodeLines = nf.readlines()
+            if len(nodeLines) == 1:  # Mac files end a line with \r instead of \n
+                nodeLines = nodeLines[0].split("\r")
             nf.close()
         except IOError:
             raise Exception( "Failed to open the file containing nodes")
             return
             
-        if len(nodeLines) == 1:  # Mac files end a line with \r instead of \n
-            nodeLines = nodeLines[0].split("\r")
-           
-        try:
-            ef = open(edgeFile, 'r')
-            edgeLines = ef.readlines()
-            ef.close()
-        except IOError:
-            raise Exception ("Fail to open file " + edgeFile)
-            return
-        if len(edgeLines) == 1:
-            edgeLines = edgeLines[0].split("\r")  
-
-        # creat a networkx graph 
+        print "Creating network"          
         self.network = nx.DiGraph()
-        print "Creating network"
 
         self.dictProteinToAntibody = dict()
         self.dictAntibodyToProtein = dict()
@@ -123,53 +107,20 @@ class PyGibbCAMP:
             self.network.add_node(fluo, nodeObj = SigNetNode(fluo, 'fluorescence', True))
             self.network.add_edge(antibody, protein)
             self.network.add_edge(antibody, fluo)
-        print "Added " + str(len(nodeLines)) + "antibody nodes"
-
-        # parse edges
-        for line in edgeLines:
-            #sorce should be protien name, sink can be protein name or an antibody
-            source, sink = line.rstrip().split(',')
-            if source not in self.dictProteinToAntibody or sink not in self.network:
-                print "Cannot add edges between nodes not in the network"
-                continue
-            
-            if self.network.node[sink]['nodeObj'].type == "phosState":
-                self.network.add_edge(source, sink)
-            else: # both source and sink are proteins, 
-                for ab in self.dictProteinToAntibody[sink]: # look up antibodies of sink
-                    self.network.add_edge(source, ab)
-                    
-        cycles = nx.simple_cycles(self.network)
-        for cyc in cycles:
-            if len(cyc) == 4:  #a cycle involve 2, cut one protein to antibody edge  
-                for n in cyc:
-                    if self.network.node[n]['nodeObj'].type == 'activeState':
-                        for child in self.network.successors(n):
-                            if child in cyc:
-                                self.network.remove_edge(n, child)
-                                break
-                
-        print "Added " + str(len(self.network.edges())) + " edges. "  
         
+        if self.perturbInstances:
+            for perturb in self.perturbInstances:
+                self.network.add_node(perturb, nodeObj = SigNetNode(perturb, 'perturbation', True))
             
-    ## Parsing data files
-    #  @param dataFileName  File name for RPPA data.  The format should be  
-    #                       a nCases * nAntibody CVS matrix file
-    #  @param perturbMatrix  File containing description of perturbation 
-    #        conditions.  The file format: each row corresponds
-    #        to a perturbation condition containing three fields:
-    #        1) canse id, which should be in the case in the data matrix 
-    #        2) perturbed protein, which should be in the node file
-    #        3) value of perturbed protein, '1' --> activation, '0' --> inactivation
-    def assocData(self, dataFileName, perturbMatrix, missingDataMatrix):
-        # parse data mastrix by calling NamedMatrix class
-        self.data = NamedMatrix(dataFileName)
-        self.dataFileName = dataFileName
-        
-        self.perturbData = NamedMatrix(perturbMatrix)
-        self.missingDataMatrix = NamedMatrix(missingDataMatrix)
-           
-
+        # Add edges between perturbation, protein activity,and  phosphorylation layers 
+        for pro in self.dictProteinToAntibody:
+            for phos in self.dictAntibodyToProtein:
+                if self.dictAntibodyToProtein[phos] == pro:
+                    continue
+                self.network.add_edge(pro, phos)
+            for perturb in perturbInstances:
+                self.network.add_edge(perturb, pro)
+            
         
     ## Init parameters of the model
     #  In Bayesian network setting, the joint probability is calculated
@@ -192,9 +143,9 @@ class PyGibbCAMP:
         if nodeObj.type == 'fluorescence':                
             # Estimate mean and sd of fluo signal using mixture model
             if nodeId in self.missingDataMatrix.getColnames():
-                nodeData = self.data.getValuesByCol(self.missingDataMatrix[:,nodeId] == 0, nodeId)
+                nodeData = self.obsData.getValuesByCol(self.missingDataMatrix[:,nodeId] == 0, nodeId)
             else:
-                nodeData = self.data.getValuesByCol(nodeId)
+                nodeData = self.obsData.getValuesByCol(nodeId)
             mixGuassians = normalmixEM(nodeData)
             # mus and sigmas are represented as nChain x 2 matrices
             nodeObj.mus = matlib.repmat(np.array(mixGuassians[2]), self.nChain, 1)
@@ -213,8 +164,8 @@ class PyGibbCAMP:
     #
     def _initHiddenStates(self):
         hiddenNodes = [n for n in self.network if not self.network.node[n]['nodeObj'].bMeasured]
-        nCases, nAntibody = self.data.shape()
-        caseNames = self.data.getRownames()
+        nCases, nAntibody = self.obsData.shape()
+        caseNames = self.obsData.getRownames()
         
         self.hiddenNodeStates = list()
         for c in range(self.nChains):
@@ -230,10 +181,10 @@ class PyGibbCAMP:
         # this can be easily achieved by taking expectation of observed 
         # phosphorylation states 
         loglikelihood = 0        
-        obsNodes = [n for n in self.network if self.network.node[n]['nodeObj'].bMeasured]
+        obsNodes = [n for n in self.network if self.network.node[n]['nodeObj'].type == 'fluorescence']
         for c in range(self.nChains):
             for nodeId in obsNodes:
-                curNodeData = self.data.getValuesByCol(nodeId)
+                curNodeData = self.obsData.getValuesByCol(nodeId)
                 pred = self.network.predecessors(nodeId)
                 predStates = self.hiddenNodeStates[c].getValuesByCol(pred)
                 nodeObj = self.network.node[nodeId]['nodeObj'] # where parameters are saved
@@ -245,10 +196,9 @@ class PyGibbCAMP:
         
         loglikelihood /= self.nChains
             
-        
-        
+
     ## Perform graph search
-    def train(self, nChains = 10, alpha = 0.2, nParents = 4, nSamples = 10, pickleDumpFile = None, maxIter = 1000):
+    def trainGibbsEM(self, nChains = 10, alpha = 0.2, nParents = 4, nSamples = 10, pickleDumpFile = None, maxIter = 1000):
         self.nChains = nChains
         self.alpha = alpha  
         self.likelihood = list()
@@ -257,82 +207,32 @@ class PyGibbCAMP:
         if pickleDumpFile:
             self.pickleDumpFile = pickleDumpFile
         else:
-            self.pickleDumpFile = self.dataFileName + "alpha" + str(self.alpha) +  ".pickle"        
+            self.pickleDumpFile = self.obsDataFileName + "alpha" + str(self.alpha) +  ".pickle"        
         
         
         # Starting EM set up Markov chains  to train a model purely based on prior knowledge
         self._initHiddenStates()
         self._initParams()
-        self._gibbsEM(maxIter)
-        self.trimEdgeByConsensus(.9)
-        
-        # search for possible structures by modifying cannonical network
-        nCases, nAntibodies = np.shape(self.data)
-        coefMatrix = np.corrcoef(np.transpose(self.data))
-        for i in range(nAntibodies):
-            antibodyI = self.data.getColnames()[i]
-            proteinI = self.dictAntibodyToProtein[antibodyI]
 
-            corrI = coefMatrix[:,i].tolist() # corr of I to other
-            corrIsorted = reversed(sorted(corrI))
-            corrIsorted.pop(0)  #correlation with self 
-            # foreach node, we consider 3 top correlated as potential parents
-            
-            for j in range(5): 
-                cycleEdge = None
-                currLikelihood = np.mean(self.liklihood[-5:-1])
-                indxJ = corrI.index(corrIsorted[j])
-                antibodyJ = self.data.getColnames()[indxJ]
-                proteinJ = self.dictAntibodyToProtein[antibodyJ]
-                if proteinI == proteinJ: # two antibodies again a common protein
-                    continue                    
-                if self.network.has_edge(proteinJ, antibodyI):
-                    continue
-                if self.network.has_edge(proteinI, antibodyJ):
-                    cycleEdge = (proteinI, antibodyJ)
-
-                self._initNodeParams(antibodyI)
-                self._gibbsEM(100)
-                newLikelihood = np.mean(self.liklihood[-5:-1])
-                if (newLikelihood - currLikelihood)  < 0:
-                    self.network.remove_edge(proteinJ, antibodyI)
-                    if cycleEdge:
-                        self.network.add_edge(cycleEdge[0], cycleEdge[1])
-        
-        # now try to delete edges that does contribute to evidence
-        self.trimEdgeByConsensus(.9)
-        return self  
-              
-        
-    ## Perform Gibbs sampling to perform EM inference of network model
-    #  
-    #   @param nChains  The number of Markov chains in the model
-    #   @alpha  The 'alpha' parameter, which will be used to train glmnet model for logistic regression
-    #   @nSamples  The number of samples to collect before EM update parameters
-    #   @pickleDumpFile The file name to save the best model while training
-    #   @maxIter  The number of maximal interation to train the model
-    #
-    #  This is the main function of the class, which handles all training aspects
-    #  
-    def _gibbsEM(self, maxIter):
+        # perform update of latent variables in a layer-wise manner
         self.likelihood = list()        
         
         self.expectedStates = list()
-        nCases, nAntibodies = np.shape(self.data)
+        nCases, nAntibodies = np.shape(self.obsData)
         for c in range(self.nChains):                  
             # each chain collect expected statistics of nodes from samples along the chain
-            self.expectedStates.append(np.zeros(np.shape(self.data)))
+            self.expectedStates.append(np.zeros(np.shape(self.obsData)))
 
         print "Starting EM: alpha = " + str(self.alpha) + "; nChains = " + str(self.nChains) + "; nSamples = " + str (self.nSamples)
         optLikelihood = float("-inf")
         bConverged = False
         sampleCount = 0
         self._updteParams(self.alpha)
-        for nIter in range(maxIter):
-            likelihood = self.calcEvidenceLikelihood()
-            print "nIter: " + str(nIter ) + "; log likelihood of evidence: " + str(likelihood)
-            self.likelihood.append(likelihood)
-            
+        likelihood = self.calcEvidenceLikelihood()
+        print "nIter: 0"  + "; log likelihood of evidence: " + str(likelihood)
+        self.likelihood.append(likelihood)
+
+        for nIter in range(maxIter):            
             # E-step of EM
             self._updateStates()            
             if  (nIter+1) % 2 == 0: # we collect sample every other iteration
@@ -366,8 +266,10 @@ class PyGibbCAMP:
                 
                 for c in range(self.nChains):  # clear expectedStates
                     self.expectedStates[c] = np.zeros(np.shape(self.hiddenNodeStates))
-
-
+                
+        # now try to delete edges that does contribute to evidence
+        self.trimEdgeByConsensus(.9)
+        return self  
             
     def _checkConvergence(self):
         # To do, add convergence checking code
@@ -380,15 +282,25 @@ class PyGibbCAMP:
 
         
     def _updateStates(self):
-        nCases, antibody = np.shape(self.data)
+        nCases, antibody = np.shape(self.obsData)
         nCases, nHiddenNodes = np.shape(self.hiddenNodeStates[0])
+        varWithMissingValues = self.missingDataMatrix.getColnames()
         
         # interate through all nodes. 
         for c in range(self.nChains):
             for nodeId in self.network:
+                nodeObj = self.network.node[nodeId]['nodeObj']
                 # skip observed nodes
-                if self.network.node[nodeId]['nodeObj'].bMeasured:
-                    #check if observed variables has missing values
+                if self.network.node[nodeId]['nodeObj'].type == 'fluorescence':
+                    # sample the missing fluo experiment data for cases with missing value                         
+                    if nodeId in varWithMissingValues:
+                        missingCases = np.where(self.missingDataMatrix.getValuesByCol(nodeId) == 1)
+                        predStates =self.hiddenNodeStates[missingCases, self.network.predecessors(nodeId)]
+                        self.obsData.data[missingCases, self.obsData.findColIndices(nodeId)] = \
+                        predStates * (np.random.nrand(len(missingCases)) * nodeObj.sigma[c, 1] + nodeObj.mus[c, 1]) \
+                        + (1 - predStates) * (np.random.nrand(len(missingCases)) * nodeObj.sigma[c, 0] + nodeObj.mus[c, 0]) 
+                        
+
                     continue
                 
                 curNodeMarginal = self.calcNodeCondProb(nodeId, c)
@@ -421,7 +333,7 @@ class PyGibbCAMP:
         if nodeObj.type == "fluorescence":
             raise Exception("Call _caclNodeMarginalProb on an observed variable " + nodeId)
 
-        nCases, nAntibody = np.shape(self.data)        
+        nCases, nAntibody = np.shape(self.obsData)        
 
         # collect the state of the predecessors of the node
         preds = self.network.predecessors(nodeId)        
@@ -446,7 +358,7 @@ class PyGibbCAMP:
             for child in children:   
                 nodeObj = self.network.node[child]['nodeObj']
                 if nodeObj.type == "fluorescence":
-                    curChildData = self.data.getValuesByCol(child)  
+                    curChildData = self.obsData.getValuesByCol(child)  
                     # calculate the probability using mixture Gaussian
                     logProbChildCondOne +=  (- np.log( nodeObj.sigma[c, 1]) + 0.5 * np.square(curChildData - nodeObj.mus[c, 1]) / np.square(nodeObj.sigma[c,1])) 
                     logProdOfChildCondZeros += (- np.log( nodeObj.sigma[c, 0]) + 0.5 * np.square(curChildData - nodeObj.mus[c, 0]) / np.square(nodeObj.sigma[c,0])) 
@@ -533,7 +445,7 @@ class PyGibbCAMP:
     def _updteParams(self, alpha = 0.1):
         # Update the parameter associated with each node, p(n | Pa(n)) using logistic regression,
         # using expected states of precessors as X and current node states acrss samples as y
-        nCases, nVariables = np.shape(self.data)
+        nCases, nVariables = np.shape(self.obsData)
         for nodeId in self.network:
             preds = self.network.predecessors(nodeId)
             predIndices = self.hiddenNodeStates[0].findColIndices(preds)
@@ -544,7 +456,7 @@ class PyGibbCAMP:
             nodeObj.fitResults = []
             for c in range(self.nChains): 
                 expectedPredState = self.expectedStates[c][:, predIndices]
-                curNodeData = self.data.getValuesByCol(nodeId)
+                curNodeData = self.obsData.getValuesByCol(nodeId)
                 if self.network.node[nodeId]['nodeObj'].type == "fluorescence":
                     nodeObj.mus[c,0] = np.mean ((1-expectedPredState) * curNodeData)
                     nodeObj.sigma[c, 0] = np.std ((1-expectedPredState) * curNodeData)
@@ -578,12 +490,11 @@ class PyGibbCAMP:
                     # extract coefficients from Rpy2 vector object
                     a0, betaMatrix = self.parseGlmnetCoef(fit)
                     for j in range(np.shape(betaMatrix)[1]):
-                        if sum(betaMatrix[:, j] != 0) > self.nParents:
+                        if sum(betaMatrix[:, j] != 0.) > self.nParents:
                             break
                     if j >= len(a0):
                         j = len(a0) - 1
                     nodeObj.params[c,:] = betaMatrix[:, j]
-                    nodeObj.fitResults.append(fit)
 
 
   

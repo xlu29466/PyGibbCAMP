@@ -99,12 +99,16 @@ class NamedMatrix:
         colIndx = [lambda x: self.colnames.index(x) for x in colnames if x in self.colnames]
         return self.data[:, colIndx]
         
+    def setValuesByColName(self, values, col):      
+        self.data[:,self.colnames.index(col)] = values
+        
     def getValuesByRow(self, rownames):
         if set(rownames) - set(self.rownames):
             raise Exception("Try to access non-existing rows")
         rowIndx = [lambda x: self.colnames.index(x) for x in rownames if x in self.rownames]
         return self.data[rowIndx, :]
         
+     
     def shape(self):
         if self.data:
             return np.shape(self.data)
