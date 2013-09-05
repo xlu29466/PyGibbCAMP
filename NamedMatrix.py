@@ -24,36 +24,38 @@ class NamedMatrix:
         
         if filename and npMatrix:  
             raise Exception ("Cannot create a NamedMatrix with both 'npMatrix' and 'filename' arguments set")
-        if not filename and not npMatrix:
+        if not filename and  npMatrix == None:
             raise Exception ("Attempt to create a NameMatrix without 'filename' or an 'npMatrix'")
         
         if filename:
+            print "Extracting matrix file " + filename
             try:
                 f = open(filename, 'r')
                 lines = f.readlines()
             except IOError:
                 print "Fail to read  file " + filename
+                return
             
-            colnames = None
             if len(lines) == 1:  # Mac version csv, with "\r" as return
                 lines = lines[0].split("\r")
-                colnames = lines.pop(0).split(',') # split  header and extract colnames
+                self.colnames = lines.pop(0).rstrip().split(',') # split  header and extract colnames
                 map(lambda x: x.rstrip(), lines)  # remove the "\r"
                 lines = "\n".join(lines)  # use "\n" to join lines
             else:
-                colnames = lines.pop(0).split(',')
+                self.colnames = lines.pop(0).rstrip().split(',')
                 lines = "".join(lines)
                 
+            self.colnames.pop(0) 
+            
             # extract condition name
-            self.rownames = list()
-            for l in lines():
-                rownames.append(l.split(',')[0])         
+            self.rownames = list()            
+            for l in lines.split("\n"):
+                self.rownames.append(l.split(',')[0]) 
                             
             # read in data and generate a numpy data matrix
-            self.data = np.genfromtxt(StringIO(lines), delimiter = ",", usecol=tuple(range(1, len(colnames))))
-
+            self.data = np.genfromtxt(StringIO(lines), delimiter = ",", usecols=tuple(range(1, len(self.colnames)+1)))
             
-        if npMatrix:
+        if npMatrix != None:
             self.data = npMatrix
             nrow, ncol = np.shape(self.data)
             if colnames:
@@ -75,6 +77,8 @@ class NamedMatrix:
                 for r in range(nrow):
                     self.rownames.append('r' + str(r))
                     
+        self.nrows, self.ncols = np.shape(self.data)
+                    
     def setColnames(self, colnames):
         if len(colnames) == len(self.colnames):
             self.colnames = colnames
@@ -94,23 +98,28 @@ class NamedMatrix:
         return self.rownames
             
     def getValuesByCol(self, colnames):
-        if set(colnames) - set(self.colnames):
-            raise Exception("Try to access nonexisting column")
-        colIndx = [lambda x: self.colnames.index(x) for x in colnames if x in self.colnames]
-        return self.data[:, colIndx]
+        if isinstance (colnames, list):
+            if not set(colnames) <= set(self.colnames):
+                raise Exception("Try to access nonexisting columns")
+            else:
+                colIndx = map(lambda x: self.colnames.index(x), colnames)
+                ixgrid = np.ix_(range(self.nrows), colIndx)
+                return self.data[ixgrid]
+
+        if isinstance(colnames, basestring): 
+            if colnames not in self.colnames:
+                raise Exception ("Try to access non-existing column")
+            else:
+                return self.data[:, self.colnames.index(colnames)]
+                
         
     def setValuesByColName(self, values, col):      
         self.data[:,self.colnames.index(col)] = values
         
-    def getValuesByRow(self, rownames):
-        if set(rownames) - set(self.rownames):
-            raise Exception("Try to access non-existing rows")
-        rowIndx = [lambda x: self.colnames.index(x) for x in rownames if x in self.rownames]
-        return self.data[rowIndx, :]
         
      
     def shape(self):
-        if self.data:
+        if self.data != None:
             return np.shape(self.data)
             
         else:
@@ -118,10 +127,19 @@ class NamedMatrix:
             
     ## Return the position indices of colnames  
     def findColIndices(self, colnames):
-        if set(colnames) - set(self.colnames):
-            raise Exception("Unknown column name is used to query index")
-            
-        return [lambda x: self.colnames.index(x) for x in colnames]
+        if isinstance (colnames, list):
+            if not set(colnames) <= set(self.colnames):
+                raise Exception("Try to access nonexisting columns")
+            else:
+                colIndx = map(lambda x: self.colnames.index(x), colnames)
+                return colIndx
+
+        if isinstance(colnames, basestring): 
+            if colnames not in self.colnames:
+                raise Exception ("Try to access non-existing column")
+            else:
+                return self.colnames.index(colnames)
+                
         
     ## Return the position indices of rownames 
     def findRowIndices(self, rownames):

@@ -9,11 +9,10 @@ class SigNetNode:
     # @param    bMeasured 
     def __init__(self, name, nodeType, bMeasured):
         self.name = name
-        self.nodeType = nodeType
+        self.type = nodeType
         self.bMeasured = bMeasured
 
-    def isMeasured(self):
-        return bMeasured
+
 
 #test comments from sjlu99
 #test 2
