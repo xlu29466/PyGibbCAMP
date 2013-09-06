@@ -115,8 +115,8 @@ class PyGibbCAMP:
                 if self.dictAntibodyToProtein[phos] == pro:
                     continue
                 self.network.add_edge(pro, phos)
-            for perturb in perturbInstances:
-                self.network.add_edge(perturb, pro)
+            #for perturb in perturbInstances:
+             #   self.network.add_edge(perturb, pro)
             
         
     ## Init parameters of the model
@@ -172,7 +172,7 @@ class PyGibbCAMP:
         self.nodeStates = list()
         for c in range(self.nChains):
             tmp = np.zeros((nCases, len(hiddenNodes)))
-            tmp[np.random.rand(nCases, len(hiddenNodes)) < 0.25] = 1
+            tmp[np.random.rand(nCases, len(hiddenNodes)) < 0.4] = 1
             tmp = np.column_stack((tmp, self.perturbData.data))
             colnames = hiddenNodes + self.perturbData.colnames
             self.nodeStates.append(NamedMatrix(npMatrix = tmp, colnames = colnames, rownames = caseNames))
@@ -203,7 +203,7 @@ class PyGibbCAMP:
             
 
     ## Perform graph search
-    def trainGibbsEM(self, nChains = 10, alpha = 0.2, nParents = 4, nSamples = 5, pickleDumpFile = None, maxIter = 1000):
+    def trainGibbsEM(self, nChains = 10, alpha = 0.1, nParents = 10, nSamples = 5, pickleDumpFile = None, maxIter = 1000):
         self.nChains = nChains
         self.alpha = alpha  
         self.likelihood = list()
@@ -212,8 +212,7 @@ class PyGibbCAMP:
         if pickleDumpFile:
             self.pickleDumpFile = pickleDumpFile
         else:
-            self.pickleDumpFile = self.obsDataFileName + "alpha" + str(self.alpha) +  ".pickle"        
-        
+            self.pickleDumpFile = self.obsDataFileName + "alpha" + str(self.alpha) +  ".pickle"  
         
         # Starting EM set up Markov chains  to train a model purely based on prior knowledge
         self._initHiddenStates()
@@ -237,7 +236,10 @@ class PyGibbCAMP:
         print "nIter: 0"  + "; log likelihood of evidence: " + str(likelihood)
         self.likelihood.append(likelihood)
 
-        for nIter in range(maxIter):            
+        for nIter in range(maxIter): 
+            #if nIter > 0 and (nIter % 100) == 0:
+            #    self.nParents -= 1
+                
             # E-step of EM
             self._updateStates()            
             if  (nIter+1) % 2 == 0: # we collect sample every other iteration
@@ -285,44 +287,12 @@ class PyGibbCAMP:
         ratio = abs(self.likelihood[-1] - ml ) / abs(ml)        
         return ratio <= 0.001
 
-        
-    def _updateStates(self):
+    def _updateActivationStates(self):
         nCases, antibody = np.shape(self.obsData.data)
         nCases, nHiddenNodes = np.shape(self.nodeStates[0].data)
-        varWithMissingValues = self.missingDataMatrix.getColnames()
-        
+
         # interate through all nodes. 
         for c in range(self.nChains):
-            # update missing fluo signals for certain proteins
-            fluoNodes = [n for n in self.network if self.network.node[n]['nodeObj'].type == 'fluorescence']
-            for nodeId in fluoNodes:
-                nodeObj = self.network.node[nodeId]['nodeObj']
-                # sample the missing fluo experiment data for cases with missing value                         
-                if nodeId in varWithMissingValues:
-                    #print "processing node with missing values: " + nodeId
-                    missingCases = self.missingDataMatrix.getValuesByCol(nodeId) == 1
-                    pred = self.network.predecessors(nodeId)[0]
-                    predStates = self.nodeStates[c].getValuesByCol(pred)[missingCases]
-                    self.obsData.data[missingCases, self.obsData.findColIndices(nodeId)] = \
-                    predStates * (np.random.randn(len(predStates)) * nodeObj.sigmas[c, 1] + nodeObj.mus[c, 1]) \
-                    + (1 - predStates) * (np.random.randn(len(predStates)) * nodeObj.sigmas[c, 0] + nodeObj.mus[c, 0])                       
-            
-            # update state layer-wise, first update the phosphorylation layer
-            phosNodes = [n for n in self.network if self.network.node[n]['nodeObj'].type == 'phosState']
-            for nodeId in phosNodes:            
-                nodeObj = self.network.node[nodeId]['nodeObj']
-                # skip observed nodes
-                if nodeObj.bMeasured:  # all other observed variables will not be sampled
-                    continue
-                
-                curNodeMarginal = self.calcNodeCondProb(nodeId, c)
-                
-                # sample states of current node based on the prob, and update 
-                sampleState = np.zeros(nCases)
-                sampleState[curNodeMarginal >= np.random.rand(nCases)] = 1.
-                curNodeIndx = self.nodeStates[c].findColIndices(nodeId)
-                self.nodeStates[c].data[:, curNodeIndx] = sampleState
-                
             activationNode = [n for n in self.network if self.network.node[n]['nodeObj'].type == 'activeState']
             for nodeId in activationNode:            
                 nodeObj = self.network.node[nodeId]['nodeObj']
@@ -345,6 +315,43 @@ class PyGibbCAMP:
                         perturbState = self.nodeStates[c].getValuesByCol(condition)
                         indx = self.nodeStates[c].findColIndices(nodeId)
                         self.nodeStates[c].data[perturbState==1, indx] = state
+                        
+        
+    def _updateStates(self):
+        nCases, antibody = np.shape(self.obsData.data)
+        nCases, nHiddenNodes = np.shape(self.nodeStates[0].data)
+        varWithMissingValues = self.missingDataMatrix.getColnames()
+        
+        # interate through all nodes. 
+        for c in range(self.nChains):
+            # update missing fluo signals for certain proteins
+            fluoNodes = [n for n in self.network if self.network.node[n]['nodeObj'].type == 'fluorescence']
+            for nodeId in fluoNodes:
+                nodeObj = self.network.node[nodeId]['nodeObj']
+                # sample the missing fluo experiment data for cases with missing value                         
+                if nodeId in varWithMissingValues:
+                    #print "processing node with missing values: " + nodeId
+                    nodeIndx = self.obsData.findColIndices(nodeId)
+                    missingCases = self.missingDataMatrix.getValuesByCol(nodeId) == 1
+                    pred = self.network.predecessors(nodeId)[0]
+                    predStates = self.nodeStates[c].getValuesByCol(pred)[missingCases]
+                    self.obsData.data[missingCases, nodeIndx] = \
+                    predStates * (np.random.randn(len(predStates)) * nodeObj.sigmas[c, 1] + nodeObj.mus[c, 1]) \
+                    + (1 - predStates) * (np.random.randn(len(predStates)) * nodeObj.sigmas[c, 0] + nodeObj.mus[c, 0])                       
+            
+            # update state layer-wise, first update the phosphorylation layer
+            phosNodes = [n for n in self.network if self.network.node[n]['nodeObj'].type == 'phosState']
+            for nodeId in phosNodes:            
+                nodeObj = self.network.node[nodeId]['nodeObj']
+                
+                curNodeMarginal = self.calcNodeCondProb(nodeId, c)
+                
+                # sample states of current node based on the prob, and update 
+                sampleState = np.zeros(nCases)
+                sampleState[curNodeMarginal >= np.random.rand(nCases)] = 1.
+                curNodeIndx = self.nodeStates[c].findColIndices(nodeId)
+                self.nodeStates[c].data[:, curNodeIndx] = sampleState
+                
             
     def calcNodeCondProb(self, nodeId, c):
         """
@@ -385,15 +392,15 @@ class PyGibbCAMP:
             for child in children:   
                 nodeObj = self.network.node[child]['nodeObj']
                 if nodeObj.type == "fluorescence":
-                    print child + " mus: " + str(nodeObj.mus)
-                    print child + " sigmas: " + str(nodeObj.sigmas)
+                    #print child + " mus: " + str(nodeObj.mus)
+                    #print child + " sigmas: " + str(nodeObj.sigmas)
                     curChildData = self.obsData.getValuesByCol(child)  
                     # calculate the probability using mixture Gaussian
-                    logProbChildCondOne +=  (- math.log(math.sqrt(2 * 3.142)) - math.log( nodeObj.sigmas[c, 1]) - 0.5 * np.square(curChildData - nodeObj.mus[c, 1]) / np.square(nodeObj.sigmas[c,1])) 
-                    logProdOfChildCondZeros += (- math.log(math.sqrt(2 * 3.142)) - math.log( nodeObj.sigmas[c, 0]) - 0.5 * np.square(curChildData - nodeObj.mus[c, 0]) / np.square(nodeObj.sigmas[c,0])) 
-                    print "logProbChildCondOne: " + str(logProbChildCondOne)
-                    print "logProdOfChildCondZeros: " + str(logProdOfChildCondZeros)
-                else:  # current child is a latent variable
+                    logProbChildCondOne =  ( - math.log( nodeObj.sigmas[c, 1]) - 0.5 * np.square(curChildData - nodeObj.mus[c, 1]) / np.square(nodeObj.sigmas[c,1])) 
+                    logProdOfChildCondZeros = ( - math.log( nodeObj.sigmas[c, 0]) - 0.5 * np.square(curChildData - nodeObj.mus[c, 0]) / np.square(nodeObj.sigmas[c,0])) 
+                    #print "logProbChildCondOne: " + str(logProbChildCondOne)
+                    #print "logProdOfChildCondZeros: " + str(logProdOfChildCondZeros)
+                else:  # current child is a latent variable, means current node is an activation node
                     # collect data and parameters associated with the node
                     curChildStates = self.nodeStates[c].getValuesByCol(child)                    
                     
@@ -405,6 +412,8 @@ class PyGibbCAMP:
                     
                     # Set the state of current node to ones 
                     curNodePosInPredList = childPreds.index(nodeId) + 1 # offset by 1 because padding 
+                    if childNodeParams[curNodePosInPredList] == 0:  # not an real edge 
+                        continue
                     childPredStates[:, curNodePosInPredList] = np.ones(nCases)                
                     pChildCondCurNodeOnes = 1 / (1 + np.exp(-np.dot(childPredStates, childNodeParams)))
                     pChildCondCurNodeOnes[pChildCondCurNodeOnes==1] -= np.finfo(np.float).eps
@@ -484,7 +493,7 @@ class PyGibbCAMP:
             for c in range(self.nChains): 
                 expectedPredState = self.expectedStates[c][:, predIndices]
                 # take care of case that all states are set one state
-                rIndx = map(lambda z: int(math.floor(z)), np.random.rand(20) * nCases)
+                rIndx = map(lambda z: int(math.floor(z)), np.random.rand(50) * nCases)
                 if sum(expectedPredState == 0) == nCases:
                     expectedPredState[rIndx] = 1
                 elif sum(expectedPredState == 1) == nCases:
@@ -496,22 +505,18 @@ class PyGibbCAMP:
                 nodeObj.mus[c, 1] = np.mean (expectedPredState * curNodeData)
                 nodeObj.sigmas[c, 1] = np.std (expectedPredState * curNodeData)  
 
-                # we constrain that mu0 to be smaller than mu1s; otherwise toggle the state             
-                if nodeObj.mus[c,0] > nodeObj.mus[c,1]:
-                    tmp = nodeObj.mus[c,0]
-                    nodeObj.mus[c,0] = nodeObj.mus[c,1]
-                    nodeObj.mus[c,1] = tmp
-                    tmp = nodeObj.sigmas[c, 0]
-                    nodeObj.sigmas[c, 0] = nodeObj.sigmas[c, 1]
-                    nodeObj.sigmas[c, 1] = tmp
-                    predStates = self.nodeStates[c].data[:,predIndices] 
-                    predOnes =  predStates == 1                    
-                    print str(predOnes.T[0])
-                    self.nodeStates[c].data[predOnes.T[0], predIndices] = 0
-                    self.nodeStates[c].data[map(lambda x: not x, predOnes.T[0]), predIndices] = 1                    
-                print "after update fluo "
-                print "mus:" + str( nodeObj.mus)
-                print "sigmas: " + str(nodeObj.sigmas) 
+#                # we constrain that mu0 to be smaller than mu1s; otherwise toggle the state             
+#                if nodeObj.mus[c,0] > nodeObj.mus[c,1]:
+#                    tmp = nodeObj.mus[c,0]
+#                    nodeObj.mus[c,0] = nodeObj.mus[c,1]
+#                    nodeObj.mus[c,1] = tmp
+#                    tmp = nodeObj.sigmas[c, 0]
+#                    nodeObj.sigmas[c, 0] = nodeObj.sigmas[c, 1]
+#                    nodeObj.sigmas[c, 1] = tmp
+#                    predStates = self.nodeStates[c].data[:,predIndices] 
+#                    predOnes =  predStates == 1                    
+#                    self.nodeStates[c].data[predOnes.T[0], predIndices] = 0
+#                    self.nodeStates[c].data[map(lambda x: not x, predOnes.T[0]), predIndices] = 1                    
 
         phosNodes = [n for n in self.network if self.network.node[n]['nodeObj'].type == 'phosState']
         for nodeId in phosNodes:            
@@ -521,11 +526,11 @@ class PyGibbCAMP:
             for c in range(self.nChains): 
                 expectedPredState = self.expectedStates[c][:, predIndices]
                 #x = np.column_stack((np.ones(nCases), expectedPredState))                    
-                x =  expectedPredState
+                x =  np.column_stack((np.ones(nCases), expectedPredState))
                 y = self.nodeStates[c].getValuesByCol(nodeId) 
                     
                 #check if all x and y are of same value, which will lead to problem for glmnet
-                rIndx = map(lambda z: int(math.floor(z)), np.random.rand(10) * nCases)
+                rIndx = map(lambda z: int(math.floor(z)), np.random.rand(50) * nCases)
                 if sum(y) == nCases:  # if every y == 1                      
                     y[rIndx] = 0                        
                 elif sum( map(lambda x: 1 - x, y)) == nCases:
@@ -542,7 +547,7 @@ class PyGibbCAMP:
                     x[rIndx, col] = 1
                     
                 # call logistic regression using glmnet from Rpy
-                fit = glmnet (x, y, alpha = alpha, family = "binomial")
+                fit = glmnet (x, y, alpha = alpha, family = "binomial", intercept = 0)
                     
                 # extract coefficients glmnet, keep the first set beta with nParent non-zeros values
                 a0, betaMatrix = self.parseGlmnetCoef(fit) 
@@ -552,21 +557,21 @@ class PyGibbCAMP:
                 if j >= len(a0):
                     j = len(a0) - 1
                 
-                nodeObj.params[c,:] = np.concatenate((np.array([a0[j]]), betaMatrix[:, j]))
+                nodeObj.params[c,:] =  betaMatrix[:, j]
 
-        phosNodes = [n for n in self.network if self.network.node[n]['nodeObj'].type == 'activeState']
-        for nodeId in phosNodes:            
+        actionNodes = [n for n in self.network if self.network.node[n]['nodeObj'].type == 'activeState']
+        for nodeId in actionNodes:            
             preds = self.network.predecessors(nodeId)
             predIndices = self.nodeStates[0].findColIndices(preds)
             nodeObj = self.network.node[nodeId]['nodeObj']            
             for c in range(self.nChains): 
                 expectedPredState = self.expectedStates[c][:, predIndices]
                 #x = np.column_stack((np.ones(nCases), expectedPredState))                    
-                x =  expectedPredState
+                x =  np.column_stack((np.ones(nCases), expectedPredState))
                 y = self.nodeStates[c].getValuesByCol(nodeId) 
                     
                 #check if all x and y are of same value, which will lead to problem for glmnet
-                rIndx = map(lambda z: int(math.floor(z)), np.random.rand(10) * nCases)
+                rIndx = map(lambda z: int(math.floor(z)), np.random.rand(50) * nCases)
                 if sum(y) == nCases:  # if every y == 1                      
                     y[rIndx] = 0                        
                 elif sum( map(lambda x: 1 - x, y)) == nCases:
@@ -583,7 +588,7 @@ class PyGibbCAMP:
                     x[rIndx, col] = 1
                     
                 # call logistic regression using glmnet from Rpy
-                fit = glmnet (x, y, alpha = alpha, family = "binomial")
+                fit = glmnet (x, y, alpha = alpha, family = "binomial", intercept = 0)
                     
                 # extract coefficients glmnet, keep the first set beta with nParent non-zeros values
                 a0, betaMatrix = self.parseGlmnetCoef(fit) 
@@ -592,8 +597,9 @@ class PyGibbCAMP:
                         break
                 if j >= len(a0):
                     j = len(a0) - 1
-                        
-                nodeObj.params[c,:] = np.concatenate((np.array([a0[j]]), betaMatrix[:, j]))
+                
+                nodeObj.params[c,:] =  betaMatrix[:, j]
+
     
     def trimEdgeByConsensus(self, percent):
         antibodies = [n for n in self.network if self.network[n]['nodeObj'].type == 'phosState']
