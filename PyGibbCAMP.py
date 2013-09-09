@@ -24,6 +24,7 @@ import  math, cPickle, re
 from SigNetNode import SigNetNode
 from StringIO import StringIO
 from NamedMatrix import NamedMatrix
+from SteinerTree import *
 
 import rpy2.robjects.numpy2ri
 rpy2.robjects.numpy2ri.activate()   # enable directly pass numpy arrary or matrix as arguments to rpy object
@@ -46,27 +47,34 @@ class PyGibbCAMP:
     def __init__(self, nodeFile , dataMatrixFile , perturbMatrix = None, missingDataMatrix=None):
         self.network = None
         self.obsData = None
+        self.missingDataMatrix = None
         perturbInstances = None
         self.nChains = 1
         
         self.dictPerturbEffect = {'AKT1' : [('GSK690693',	0), \
         ('GSK690693_GSK1120212', 0)], 'MAP2K1' : [('GSK690693_GSK1120212', 0)],\
         'EGFR': [('EGF' , 1), ('FGF1', 1)]}
+#        self.stimuli = ['EGF',	'FGF1',	'HGF',	'IGF1', 'Insulin',	'NRG1',	'PBS',	'Serum']
 
         # parse data mastrix by calling NamedMatrix class
         if not dataMatrixFile:
             raise Exception("Cannot create PyCAMP obj without 'dataMatrixFile'")
             return
         self.obsData = NamedMatrix(dataMatrixFile)
+        nCases, nAntibodies = np.shape(self.obsData.data)
         self.obsData.colnames = map(lambda s: s+'F', self.obsData.colnames)
         self.obsDataFileName = dataMatrixFile
         
         if perturbMatrix:        
             self.perturbData = NamedMatrix(perturbMatrix)
             perturbInstances = self.perturbData.getColnames()
+            self.perturbInstances = perturbInstances
                     
         if missingDataMatrix:
             self.missingDataMatrix = NamedMatrix(missingDataMatrix)
+            allMissing = np.sum(self.missingDataMatrix, 0) ==  nCases
+            if np.any(allMissing):
+                raise Exception ("Data matrix contain data-less columns")
             self.missingDataMatrix.colnames = map(lambda s: s+'F', self.missingDataMatrix.colnames)
 
         if not nodeFile:
@@ -100,16 +108,16 @@ class PyGibbCAMP:
             
             fluo = antibody + 'F'
             if protein not in self.network:
-                self.network.add_node(protein, nodeObj = SigNetNode(protein, 'activeState', False))
-            self.network.add_node(antibody, nodeObj= SigNetNode(antibody, 'phosState', False))
-            self.network.add_node(fluo, nodeObj = SigNetNode(fluo, 'fluorescence', True))
+                self.network.add_node(protein, nodeObj = SigNetNode(protein, 'ACTIVATIONSTATE', False))
+            self.network.add_node(antibody, nodeObj= SigNetNode(antibody, 'PHOSPHORYLATIONSTATE', False))
+            self.network.add_node(fluo, nodeObj = SigNetNode(fluo, 'FLUORESCENCE', True))
             self.network.add_edge(antibody, protein)
             self.network.add_edge(antibody, fluo)
         
         for perturb in perturbInstances:
-            self.network.add_node(perturb, nodeObj = SigNetNode(perturb, 'perturbation', True))                
+            self.network.add_node(perturb, nodeObj = SigNetNode(perturb, 'PERTURBATION', True))                
             
-        # Add edges between perturbation, protein activity,and  phosphorylation layers 
+        # Add edges between PERTURBATION, protein activity,and  phosphorylation layers 
         for pro in self.dictProteinToAntibody:
             for phos in self.dictAntibodyToProtein:
                 if self.dictAntibodyToProtein[phos] == pro:
@@ -137,17 +145,16 @@ class PyGibbCAMP:
             
     def _initNodeParams(self, nodeId):
         nodeObj = self.network.node[nodeId]['nodeObj']
-        if nodeObj.type == 'fluorescence':                
+        if nodeObj.type == 'FLUORESCENCE':                
             # Estimate mean and sd of fluo signal using mixture model
-            if nodeId in self.missingDataMatrix.getColnames():
+            if self.missingDataMatrix and nodeId in self.missingDataMatrix.getColnames():
                 nodeData = self.obsData.getValuesByCol( nodeId)
                 nodeData = nodeData[self.missingDataMatrix.getValuesByCol(nodeId) == 0]
-                #print str(nodeData)
             else:
                 nodeData = self.obsData.getValuesByCol(nodeId)
             nodeObj.mus = np.zeros((self.nChains, 2))
             nodeObj.sigmas = np.zeros((self.nChains, 2))
-            for c in range(self.nChains):    
+            for c in range(self.nChains):   
                 mixGaussians = normalmixEM(robjects.FloatVector(nodeData), k = 2 )
                 # mus and sigmas are represented as nChain x 2 matrices
                 nodeObj.mus[c,:] = np.array(mixGaussians[2])
@@ -166,7 +173,7 @@ class PyGibbCAMP:
     #
     def _initHiddenStates(self):
         hiddenNodes = [n for n in self.network if not self.network.node[n]['nodeObj'].bMeasured]
-        phosNodes = [n for n in self.network if self.network.node[n]['nodeObj'].type == 'phosState']
+        phosNodes = [n for n in self.network if self.network.node[n]['nodeObj'].type == 'PHOSPHORYLATIONSTATE']
         #print str(phosNodes)
         nCases, nAntibody = self.obsData.shape()
         caseNames = self.obsData.getRownames()
@@ -195,21 +202,21 @@ class PyGibbCAMP:
                 self.nodeStates[c].data[:,nodeIndx] = tmp
                 
                 # take care of missing values by random sampling
-                if node in self.missingDataMatrix.getColnames(): 
-                    #print "processing node with missing values: " + nodeId
-                    missingCases = self.missingDataMatrix.getValuesByCol(node) == 1
-                    tmp = np.zeros(sum(missingCases))
-                    tmp[np.random.rand(len(tmp)) <= 0.3] = 1
-                    self.nodeStates[c].data[missingCases, nodeIndx] = tmp
+                if self.missingDataMatrix:
+                    if node in self.missingDataMatrix.getColnames(): 
+                        #print "processing node with missing values: " + nodeId
+                        missingCases = self.missingDataMatrix.getValuesByCol(node) == 1
+                        tmp = np.zeros(sum(missingCases))
+                        tmp[np.random.rand(len(tmp)) <= 0.3] = 1
+                        self.nodeStates[c].data[missingCases, nodeIndx] = tmp
                     
         
         
     ## Calculate the marginal probability of observing the measured data by
     #  integrating out all possible setting of latent variable states and 
-    #  model parameters.
-            
+    #  model parameters.            
     def calcEvidenceLikelihood(self):
-        phosNodes = [n for n in self.network if self.network.node[n]['nodeObj'].type == 'phosState']
+        phosNodes = [n for n in self.network if self.network.node[n]['nodeObj'].type == 'PHOSPHORYLATIONSTATE']
         loglikelihood = 0
         nCases, nAntibodies = np.shape(self.obsData.data) 
         for nodeId in phosNodes:
@@ -235,11 +242,24 @@ class PyGibbCAMP:
         self.likelihood = list()
         self.nSamples = nSamples
         self.nParents = nParents
+        
         if pickleDumpFile:
             self.pickleDumpFile = pickleDumpFile
         else:
             self.pickleDumpFile = self.obsDataFileName + "alpha" + str(self.alpha) +  ".pickle"  
         
+        # check if the network and data agrees
+        nodeToDelete = list()
+        for nodeId in self.network:
+            if self.network.node[nodeId]['nodeObj'].type == 'FLUORESCENCE' and nodeId not in self.obsData.getColnames():
+                print "Node " + nodeId + " don't has associated data"
+                nodeToDelete.append(nodeId)
+                nodeToDelete.append(self.network.predecessors(nodeId)[0])
+        for nodeId in nodeToDelete:
+            if self.network.has_node(nodeId):
+                print "removing node " + nodeId
+                self.network.remove_node(nodeId)
+
         # Starting EM set up Markov chains  to train a model purely based on prior knowledge        
         self._initParams()
         self._initHiddenStates()
@@ -253,7 +273,7 @@ class PyGibbCAMP:
             # each chain collect expected statistics of nodes from samples along the chain
             self.expectedStates.append(np.zeros(np.shape(self.nodeStates[c].data)))
 
-        print "Starting EM: alpha = " + str(self.alpha) + "; nChains = " + str(self.nChains) + "; nSamples = " + str (self.nSamples)
+        print "Starting EM: alpha = " + str(self.alpha) + "; nChains = " + str(self.nChains) + "; nSamples = " + str (self.nSamples) + "; nParents = " + str(self.nParents)
         optLikelihood = float("-inf")
         bConverged = False
         sampleCount = 0
@@ -261,7 +281,6 @@ class PyGibbCAMP:
         likelihood = self.calcEvidenceLikelihood()
         print "nIter: 0"  + "; log likelihood of evidence: " + str(likelihood)
         self.likelihood.append(likelihood)
-        mynParents = 10
         for nIter in range(maxIter): 
                 
             # E-step of EM
@@ -272,14 +291,11 @@ class PyGibbCAMP:
                     self.expectedStates[c] +=  self.nodeStates[c].data                
                 
             # M-step of EM.  We only update parameters after a collecting a certain number of samples
-            if sampleCount >= self.nSamples:
-                if mynParents > self.nParents:
-                    mynParents -= 1
-                    
+            if sampleCount >= self.nSamples:                    
                 sampleCount = 0
                  # take expectation of sample states
                 self.expectedStates = map(lambda x: x / self.nSamples, self.expectedStates)
-                self._updteParams(self.alpha, nparents = mynParents)
+                self._updteParams(self.alpha, nparents = self.nParents)
                 
                 likelihood = self.calcEvidenceLikelihood()
                 self.likelihood.append(likelihood)   
@@ -302,7 +318,7 @@ class PyGibbCAMP:
                     self.expectedStates[c] = np.zeros(np.shape(self.nodeStates[c].data))
                 
         # now try to delete edges that does contribute to evidence
-        self.trimEdgeByConsensus(.9)
+        #self.trimEdgeByConsensus(.9)
         return self  
             
     def _checkConvergence(self):
@@ -319,7 +335,7 @@ class PyGibbCAMP:
         nCases, nHiddenNodes = np.shape(self.nodeStates[0].data)
 
         # interate through all nodes. 
-        activationNode = [n for n in self.network if self.network.node[n]['nodeObj'].type == 'activeState']
+        activationNode = [n for n in self.network if self.network.node[n]['nodeObj'].type == 'ACTIVATIONSTATE']
                     
         for nodeId in activationNode: 
             for c in range(self.nChains):
@@ -464,9 +480,9 @@ class PyGibbCAMP:
         
         for nodeId in self.network:     
             nodeObj = self.network.node[nodeId]['nodeObj'] 
-            if nodeObj.bMeasured:
+            if nodeObj.type == 'FLUORESCENCE' or nodeObj.type == 'PERTURBATION':
                 continue
-            
+            nodeObj.fitRes = list()
             preds = self.network.predecessors(nodeId)
             predIndices = self.nodeStates[0].findColIndices(preds)
                        
@@ -495,31 +511,101 @@ class PyGibbCAMP:
                     
                 # call logistic regression using glmnet from Rpy
                 fit = glmnet (x, y, alpha = alpha, family = "binomial", intercept = 0)
+                nodeObj.fitRes.append(fit)
                     
                 # extract coefficients glmnet, keep the first set beta with nParent non-zeros values
                 a0, betaMatrix = self.parseGlmnetCoef(fit) 
                 for j in range(np.shape(betaMatrix)[1]):
-                    if sum(betaMatrix[:, j] != 0.) > nparents:
+                    if sum(betaMatrix[:, j] != 0.) >= nparents:
                         break
                 if j >= len(a0):
                     j = len(a0) - 1
-                
-                nodeObj.params[c,:] =  betaMatrix[:, j]
+                    
+                myparams = betaMatrix[:, j]
+                if sum( myparams != 0.) > nparents:
+                    sortedParams = sorted(np.abs(myparams))                    
+                    myparams[np.abs(myparams) < sortedParams[-self.nParents]] = 0.  
+                    
+                nodeObj.params[c,:] =  myparams
+                        
+                        
+    def getStimuliSpecificNet(self, stimulus):  
+        self.stimuli = ['EGF',	'FGF1',	'HGF',	'IGF1',	 'Insulin',	'NRG1',	 'PBS',	 'Serum']
+        # trim unused edges
+        if not stimulus in self.nodeStates[0].getColnames():
+            raise Exception("Input stimulus '" + stimulus + "' is not in the experiment data")
 
+        #self.trimEdgeByConsensus(0.9)
+        stimulusCases = self.perturbData.getValuesByCol(stimulus) == 1
+        controlCases = np.sum(self.perturbData.getValuesByCol(self.stimuli), 1) == 0
+        
+        # identify the nodes to keep by determine if a node responds to a stimuli
+        activeNodes = set()
+        activeNodes.add(stimulus)
+        for nodeId in self.network:            
+            if self.network.node[nodeId]['nodeObj'].type == 'FLUORESCENCE' \
+            or self.network.node[nodeId]['nodeObj'].type == 'fluorescence':
+                nodeControlValues = self.obsData.getValuesByCol(nodeId)[controlCases]
+                nodeStimulValues = self.obsData.getValuesByCol(nodeId)[stimulusCases]
+                ttestRes = R('t.test')(robjects.FloatVector(nodeControlValues), robjects.FloatVector(nodeStimulValues))
+                pvalue = np.array(ttestRes.rx('p.value')[0])[0]
+                if pvalue < 0.05:
+                    activeNodes.add(self.network.predecessors(nodeId)[0])
 
-    
-    def trimEdgeByConsensus(self, percent=.9):
-        phosNodes = [n for n in self.network if self.network.node[n]['nodeObj'].type == 'phosState']
-        for node in phosNodes:            
-            preds = self.network.predecessors(node)
-            if len(preds) > 0:
-                nodeParams = self.network.node[node]['nodeObj'].params 
-                nChain, nParams = np.shape(nodeParams)
+        # copy network to a tmp, redirect edges from activation state nodes 
+        # Edge indicates the impact 
+        tmpNet = nx.DiGraph()
+        for u,  v in self.network.edges():
+            # we are only interested in the edge from protein point to antibody
+            if (self.network.node[u]['nodeObj'].type == 'ACTIVATIONSTATE'\
+            or self.network.node[u]['nodeObj'].type == 'activeState')\
+            and (self.network.node[v]['nodeObj'].type == 'PHOSPHORYLATIONSTATE'\
+            or self.network.node[v]['nodeObj'].type == 'phosState'):
+                # extract parameters associated with u and v
+                vPreds = self.network.predecessors(v)
+                uIndx = vPreds.index(u)
+                vParams = np.sum(self.network.node[v]['nodeObj'].params, 0)  
+                paramZeros = np.sum(self.network.node[v]['nodeObj'].params == 0, 0)
+                if np.float(paramZeros[uIndx+1]) / float(self.nChains) > .9:
+                    continue  # don't add edge with beta == 0
+                    
+                for ab in self.dictProteinToAntibody[u]: 
+                    if ab not in self.network:
+                        continue
+                    
+                    if vParams[uIndx+1] > 0:
+                        tmpNet.add_edge(ab, v, beta = "+")
+                    else:
+                        tmpNet.add_edge(ab, v, beta = "-")          
             
-                for i in range(1, nParams):
-                    if sum(nodeParams[:,i]==0) > math.floor(nChain * percent):
-                        self.network.remove_edge(preds[i-1], node)
+        # remove leave nodes that is not in activeNodes list
+        while True:
+            leafNodes = []
+            for nodeId in tmpNet:                     
+                if (nodeId not in activeNodes and len(tmpNet.successors(nodeId)) == 0)\
+                or (nodeId not in activeNodes and len(tmpNet.predecessors(nodeId)) == 0):
+                    leafNodes.append(nodeId)
+                    
+            if len(leafNodes) == 0:
+                break
             
+            for leaf in leafNodes:
+                tmpNet.remove_node(leaf)
+        
+#        # now print out the edges of the remaining network
+#        for u, v in tmpNet.edges():
+#            print u + " " + tmpNet.edge[u][v]['beta'] + " " + v
+#        
+        return tmpNet
+            
+                         
+                        
+    def toGraphML(self, filename):
+        tmpNet = nx.DiGraph()
+        for edge in self.network.edges():
+            tmpNet.add_edge(edge)
+            
+        nx.write_graphml(tmpNet, filename, encoding='utf-8', prettyprint=True)
+        
+        
 
-    
-    
