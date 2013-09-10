@@ -531,6 +531,7 @@ class PyGibbCAMP:
                         
     def getStimuliSpecificNet(self, stimulus):  
         self.stimuli = ['EGF',	'FGF1',	'HGF',	'IGF1',	 'Insulin',	'NRG1',	 'PBS',	 'Serum']
+        #self.stimuli = ['loLIG1',	'hiLIG1',	'loLIG2',	'hiLIG2']
         # trim unused edges
         if not stimulus in self.nodeStates[0].getColnames():
             raise Exception("Input stimulus '" + stimulus + "' is not in the experiment data")
@@ -564,7 +565,9 @@ class PyGibbCAMP:
                 # extract parameters associated with u and v
                 vPreds = self.network.predecessors(v)
                 uIndx = vPreds.index(u)
-                vParams = np.sum(self.network.node[v]['nodeObj'].params, 0)  
+                vParams = np.sum(self.network.node[v]['nodeObj'].params, 0) 
+                if len(vParams) != (len(vPreds) + 1):
+                    raise Exception ("Bug in retrieving parameters of node v " + u)
                 paramZeros = np.sum(self.network.node[v]['nodeObj'].params == 0, 0)
                 if np.float(paramZeros[uIndx+1]) / float(self.nChains) > .9:
                     continue  # don't add edge with beta == 0
@@ -572,11 +575,21 @@ class PyGibbCAMP:
                 for ab in self.dictProteinToAntibody[u]: 
                     if ab not in self.network:
                         continue
+                    # find the impact of phosphorylation on activation state
+                    uPreds = self.network.predecessors(u)
+                    uParams = np.mean(self.network.node[u]['nodeObj'].params, 0) 
+                    if len(uParams) != (len(uPreds) + 1):
+                        raise Exception ("Bug in retrieving parameters of node v " + u)
+                    #uAntibodyParam = uParams[uPreds.index(ab) + 1]
                     
-                    if vParams[uIndx+1] > 0:
-                        tmpNet.add_edge(ab, v, beta = "+")
-                    else:
-                        tmpNet.add_edge(ab, v, beta = "-")          
+#                    if vParams[uIndx+1] > 0. and (vParams[uIndx+1] * uAntibodyParam) > 0:
+#                        tmpNet.add_edge(ab, v, effect = "+", betaValue = vParams[uIndx+1])
+#                    elif (vParams[uIndx+1] * uAntibodyParam) < 0.:
+#                        tmpNet.add_edge(ab, v, effect = "-", betaValue = vParams[uIndx+1])          
+                    if vParams[uIndx+1] > 0. :
+                        tmpNet.add_edge(ab, v, effect = "+", betaValue = vParams[uIndx+1])
+                    elif vParams[uIndx+1]  < 0.:
+                        tmpNet.add_edge(ab, v, effect = "-", betaValue = vParams[uIndx+1])          
             
         # remove leave nodes that is not in activeNodes list
         while True:
@@ -592,10 +605,7 @@ class PyGibbCAMP:
             for leaf in leafNodes:
                 tmpNet.remove_node(leaf)
         
-#        # now print out the edges of the remaining network
-#        for u, v in tmpNet.edges():
-#            print u + " " + tmpNet.edge[u][v]['beta'] + " " + v
-#        
+        # now try to remove cycles and make the tmpNet a DAG
         return tmpNet
             
                          
@@ -607,5 +617,16 @@ class PyGibbCAMP:
             
         nx.write_graphml(tmpNet, filename, encoding='utf-8', prettyprint=True)
         
+#    # this funciton implement 
+#    def K2LikeGreedySearch (self, tmpNet):
+#        for node in tmpNet:
+#            ancestors = tmpNet.predecessors(node)
+#            preds = []
+#            while True:
+#                
+                
+                
+                
+            
         
 
