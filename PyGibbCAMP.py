@@ -530,20 +530,19 @@ class PyGibbCAMP:
                         
                         
     def getStimuliSpecificNet(self, stimulus):  
-        self.stimuli = ['EGF',	'FGF1',	'HGF',	'IGF1',	 'Insulin',	'NRG1',	 'PBS',	 'Serum']
-        #self.stimuli = ['loLIG1',	'hiLIG1',	'loLIG2',	'hiLIG2']
+        #self.stimuli = ['EGF',	'FGF1',	'HGF',	'IGF1',	 'Insulin',	'NRG1',	 'PBS',	 'Serum']
+        self.stimuli = ['loLIG1',	'hiLIG1',	'loLIG2',	'hiLIG2']
         # trim unused edges
         if not stimulus in self.nodeStates[0].getColnames():
             raise Exception("Input stimulus '" + stimulus + "' is not in the experiment data")
 
         #self.trimEdgeByConsensus(0.9)
         stimulusCases = self.perturbData.getValuesByCol(stimulus) == 1
-        controlCases = np.sum(self.perturbData.getValuesByCol(self.stimuli), 1) == 0
-        
+        controlCases = self.perturbData.getValuesByCol(stimulus) == 0
         # identify the nodes to keep by determine if a node responds to a stimuli
         activeNodes = set()
-        activeNodes.add(stimulus)
-        for nodeId in self.network:            
+        nCases, nvariables = np.shape(self.obsData.data)
+        for nodeId in self.network:
             if self.network.node[nodeId]['nodeObj'].type == 'FLUORESCENCE' \
             or self.network.node[nodeId]['nodeObj'].type == 'fluorescence':
                 nodeControlValues = self.obsData.getValuesByCol(nodeId)[controlCases]
@@ -551,17 +550,23 @@ class PyGibbCAMP:
                 ttestRes = R('t.test')(robjects.FloatVector(nodeControlValues), robjects.FloatVector(nodeStimulValues))
                 pvalue = np.array(ttestRes.rx('p.value')[0])[0]
                 if pvalue < 0.05:
-                    activeNodes.add(self.network.predecessors(nodeId)[0])
+                    activeNodes.add(self.network.predecessors(nodeId)[0])                
+        
+        print "Total " + str(len(activeNodes)) + " are activated under stimulus: " + stimulus
 
         # copy network to a tmp, redirect edges from activation state nodes 
         # Edge indicates the impact 
         tmpNet = nx.DiGraph()
         for u,  v in self.network.edges():
+            if v not in activeNodes:
+                continue
+            
             # we are only interested in the edge from protein point to antibody
             if (self.network.node[u]['nodeObj'].type == 'ACTIVATIONSTATE'\
             or self.network.node[u]['nodeObj'].type == 'activeState')\
             and (self.network.node[v]['nodeObj'].type == 'PHOSPHORYLATIONSTATE'\
             or self.network.node[v]['nodeObj'].type == 'phosState'):
+                
                 # extract parameters associated with u and v
                 vPreds = self.network.predecessors(v)
                 uIndx = vPreds.index(u)
@@ -575,20 +580,10 @@ class PyGibbCAMP:
                 for ab in self.dictProteinToAntibody[u]: 
                     if ab not in self.network:
                         continue
-                    # find the impact of phosphorylation on activation state
-                    uPreds = self.network.predecessors(u)
-                    uParams = np.mean(self.network.node[u]['nodeObj'].params, 0) 
-                    if len(uParams) != (len(uPreds) + 1):
-                        raise Exception ("Bug in retrieving parameters of node v " + u)
-                    #uAntibodyParam = uParams[uPreds.index(ab) + 1]
-                    
-#                    if vParams[uIndx+1] > 0. and (vParams[uIndx+1] * uAntibodyParam) > 0:
-#                        tmpNet.add_edge(ab, v, effect = "+", betaValue = vParams[uIndx+1])
-#                    elif (vParams[uIndx+1] * uAntibodyParam) < 0.:
-#                        tmpNet.add_edge(ab, v, effect = "-", betaValue = vParams[uIndx+1])          
+                                       
                     if vParams[uIndx+1] > 0. :
                         tmpNet.add_edge(ab, v, effect = "+", betaValue = vParams[uIndx+1])
-                    elif vParams[uIndx+1]  < 0.:
+                    elif vParams[uIndx+1]  < 0. :
                         tmpNet.add_edge(ab, v, effect = "-", betaValue = vParams[uIndx+1])          
             
         # remove leave nodes that is not in activeNodes list
