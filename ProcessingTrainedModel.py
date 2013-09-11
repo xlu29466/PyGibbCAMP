@@ -10,9 +10,8 @@ Created on Thu Aug 29 08:29:35 2013
 import os, re, cPickle
 from PyGibbCAMP import PyGibbCAMP
 import networkx as nx
-import networkx, os, sys
+import os, sys
 from graphNew2011_xgmml import *
-
 
 
 def draw_xgmml(p_graph, p_graphName):
@@ -33,38 +32,84 @@ def draw_xgmml(p_graph, p_graphName):
    g.drawGraph()
 
 
-pickledir = "/Users/xinghualu/Dropbox/Dream8/PyGibbCAMP/ProcessedData/cellline.specific.tables/MCF7/"
+#pickledir = "/Users/xinghualu/Dropbox/Dream8/PyGibbCAMP/ProcessedData/cellline.specific.tables/BT20/"
+
+cellLine = "UACC812"
+pickledir = "/Users/xinghualu/Dropbox/Dream8/PyGibbCAMP/ProcessedData/cellline.specific.tables/" + cellLine + "/"
 #pickledir = "/Users/xinghualu/Dropbox/Dream8/PyGibbCAMP/ProcessedData/insilico/"
 os.chdir(pickledir)
 files = os.listdir(pickledir)
-bestModel = None
-bestLikelihood = float("-inf")
-bestModelName = None
+bestModels = dict()
+nKeeps = 5
+n = 0
 for f in files:    
     if re.search('pickle$', f):
+        n += 1
         print "Reading pickle file " + f
         m = cPickle.load(open(f, 'rb'))
 
-        if  m.likelihood[-1] > bestLikelihood:
-            bestLikelihood = m.likelihood[-1]
-            bestModel = m
-            bestModelName = f
+        if n <= nKeeps: 
+            bestModels[f] = m
+        else:
+            for model in bestModels:
+                if m.likelihood[-1] > bestModels[model].likelihood[-1]:                    
+                    del (bestModels[model])
+                    bestModels[f] = m
+                    break
         
-#f = pickledir + "data.matrix.csvalpha-1.0.pickle"        
-print "Best human model: " + bestModelName
+print "Best models: " + str(bestModels)
 
-stimuli = ['EGF', 	'FGF1', 	'HGF',	'IGF1',	'Insulin',	'NRG1',	'PBS',	'Serum']
+f = open("likelihoods.txt", 'w')
+for m in bestModels:
+    f.write(m + " likelihood: " + str(bestModels[m].likelihood[-1]) + "\n")
+f.close()
+
+stimuli = ['EGF', 'FGF1', 	'HGF',	'IGF1',	'Insulin',	'NRG1',	'PBS',	'Serum']
+#stimuli = ['EGF']#, 	'FGF1', 	'HGF',	'IGF1',	'Insulin',	'NRG1',	'PBS',	'Serum']
 #stimuli = ['loLIG1',	'hiLIG1',	'loLIG2',	'hiLIG2']
+
+pthreshold = 0.2
 for s in stimuli:
+    outNetwork = nx.DiGraph()
     print "Extract network for " + s
-    tmpNet = bestModel.getStimuliSpecificNet(s)
-    print "Total number of nodes: " + str(len(tmpNet.nodes())) + "; total number of edges: " + str(len(tmpNet.edges()))
-    graphmlFile = bestModelName + "." + s + "edges.txt"
-    f = open (graphmlFile, 'w')
-    for u, v in tmpNet.edges():
-        f.write(u + "\t" + tmpNet.edge[u][v]['effect'] + "\t" + v + "\n")
-    f.close()
+    for model in bestModels:
+        print "Processing model: " + model
+        tmpNet = bestModels[model].getStimuliSpecificNet(s, pthreshold)
+        f = open (model + "." + s + ".p" + str(pthreshold) + ".edges.txt", 'w')
+        for u, v in tmpNet.edges():
+            f.write( u + "\t" + tmpNet.edge[u][v]['effect'] + "\t"  + v + "\n")
+            if not outNetwork.has_edge(u, v):
+                outNetwork.add_edge(u, v, effect = [tmpNet.edge[u][v]['effect']])
+            else:
+                outNetwork.edge[u][v]['effect'].append(tmpNet.edge[u][v]['effect'])
+        f.close()
+        draw_xgmml(tmpNet, model + s + ".p" + str(pthreshold))
+        
+    fileName1 = pickledir + cellLine + "." + s + ".combinedNet.edges.txt"
+    fileName2 = pickledir + cellLine + "." + s + ".combinedNet.edges.prob.txt"
+    f1 = open (fileName1, 'w')
+    f2 = open (fileName2, 'w')
     
-    draw_xgmml(tmpNet, bestModelName + "." + s)
+    for u, v in outNetwork.edges():
+        effect = 0
+        prob = 0
+        for e in outNetwork.edge[u][v]['effect']:
+            if e == '+':
+                effect += 1
+            else:
+                effect -=1
+        avgEffect = effect / len(outNetwork.edge[u][v]['effect'])
+        if avgEffect > 0: 
+            f1.write(u + "\t1\t"  + v + "\n")
+            outNetwork.edge[u][v]['effect']= '+'
+        else:
+            f1.write(u + "\t-1\t"  + v + "\n")
+            outNetwork.edge[u][v]['effect']= '-'
+        prob = float(len(outNetwork.edge[u][v]['effect'])) / len(bestModels)
+        f2.write(u + "\t" + str(prob) + "\t"  + v + "\n")
+    f1.close()
+    f2.close()
+    draw_xgmml(outNetwork, pickledir + cellLine + "." + s + ".combinedNet")
+    
 
         

@@ -55,6 +55,7 @@ class PyGibbCAMP:
         ('GSK690693_GSK1120212', 0)], 'MAP2K1' : [('GSK690693_GSK1120212', 0)],\
         'EGFR': [('EGF' , 1), ('FGF1', 1)]}
 #        self.stimuli = ['EGF',	'FGF1',	'HGF',	'IGF1', 'Insulin',	'NRG1',	'PBS',	'Serum']
+            
 
         # parse data mastrix by calling NamedMatrix class
         if not dataMatrixFile:
@@ -117,14 +118,32 @@ class PyGibbCAMP:
         for perturb in perturbInstances:
             self.network.add_node(perturb, nodeObj = SigNetNode(perturb, 'PERTURBATION', True))                
             
-        # Add edges between PERTURBATION, protein activity,and  phosphorylation layers 
-        for pro in self.dictProteinToAntibody:
-            for phos in self.dictAntibodyToProtein:
-                if self.dictAntibodyToProtein[phos] == pro:
-                    continue
-                self.network.add_edge(pro, phos)
+        # Add edges between PERTURBATION, protein activity,and  phosphorylation layers.  Edges
+        # should satisfy the topological relationship
+        toposortedProteins = ['EGFR',  'ERBB2', 'ERBB3', 'MET', 'PDK1','PRKCA', \
+        'PRKCD', 'PRKCA;PRKCB;PRKCD;PRKCE;PRKCH;PRKCQ','SRC', 'RAF1',  'PRKAA1',  'AKT1', 'AKT1S1', 'PRKAA1', \
+        'GSK3A;GSK3B', 'RAF1',  'RELA', 'CDKN1B', 'MTOR', 'RICTOR', 'NDRG1',  \
+        'MAPK8', 'MAP2K1', 'PEA15', 'MAPK14', 'MAPK1;MAPK3', 'RPS6KA1', 'RPS6KB1', 'ACACA',\
+        'RPS6', 'BAD', 'STAT3', 'ESR1', 'EIF4EBP1', 'YBX1', 'RB1', 'YAP1', 'JUN', 'CHEK1', 'CHEK2']
+        
+        for perturb in perturbInstances:
+            for i in range(4) :
+                pro = toposortedProteins[i]
+                for ab in self.dictProteinToAntibody[pro]:
+                    self.network.add_edge(perturb, ab)            
+                
+        for source in self.dictProteinToAntibody:
             for perturb in perturbInstances:
-                self.network.add_edge(perturb, pro)
+                self.network.add_edge(perturb, source)
+
+            for sink in self.dictAntibodyToProtein:
+                sinkProtein = self.dictAntibodyToProtein[sink]
+                if sinkProtein == source:  # do not cycle to self
+                    continue
+                if toposortedProteins.index(sinkProtein) < toposortedProteins.index(source) :
+                    continue
+                self.network.add_edge(source, sink)
+                
             
         
     ## Init parameters of the model
@@ -484,6 +503,8 @@ class PyGibbCAMP:
                 continue
             nodeObj.fitRes = list()
             preds = self.network.predecessors(nodeId)
+            if len(preds) == 0:
+                raise Exception ("Latent node " + nodeId + " has no parents")
             predIndices = self.nodeStates[0].findColIndices(preds)
                        
             for c in range(self.nChains): 
@@ -529,16 +550,22 @@ class PyGibbCAMP:
                 nodeObj.params[c,:] =  myparams
                         
                         
-    def getStimuliSpecificNet(self, stimulus):  
-        #self.stimuli = ['EGF',	'FGF1',	'HGF',	'IGF1',	 'Insulin',	'NRG1',	 'PBS',	 'Serum']
-        self.stimuli = ['loLIG1',	'hiLIG1',	'loLIG2',	'hiLIG2']
+    def getStimuliSpecificNet(self, stimulus, pthreshold = 0.1):  
+        self.stimuli = ['EGF',	'FGF1',	'HGF',	'IGF1',	 'Insulin',	'NRG1',	 'PBS',	 'Serum']
+        
+        #self.stimuli = ['loLIG1',	'hiLIG1',	'loLIG2',	'hiLIG2']
         # trim unused edges
         if not stimulus in self.nodeStates[0].getColnames():
             raise Exception("Input stimulus '" + stimulus + "' is not in the experiment data")
 
         #self.trimEdgeByConsensus(0.9)
         stimulusCases = self.perturbData.getValuesByCol(stimulus) == 1
-        controlCases = self.perturbData.getValuesByCol(stimulus) == 0
+        #This line is for real experiments which has time zero condition
+        controlCases = np.sum(self.perturbData.getValuesByCol(self.stimuli), 1) == 0
+        
+        # this is for in sillico experiments which do not have time zeros condition.
+        #controlCases = self.perturbData.getValuesByCol(stimulus) == 0
+        
         # identify the nodes to keep by determine if a node responds to a stimuli
         activeNodes = set()
         nCases, nvariables = np.shape(self.obsData.data)
@@ -549,10 +576,11 @@ class PyGibbCAMP:
                 nodeStimulValues = self.obsData.getValuesByCol(nodeId)[stimulusCases]
                 ttestRes = R('t.test')(robjects.FloatVector(nodeControlValues), robjects.FloatVector(nodeStimulValues))
                 pvalue = np.array(ttestRes.rx('p.value')[0])[0]
-                if pvalue < 0.05:
+                #print  "pvalue: " + self.network.predecessors(nodeId)[0] + "; " + str(pvalue) 
+                if pvalue <= pthreshold:                    
                     activeNodes.add(self.network.predecessors(nodeId)[0])                
         
-        print "Total " + str(len(activeNodes)) + " are activated under stimulus: " + stimulus
+        print "Total " + str(len(activeNodes)) + " are activated under stimulus: " + stimulus         
 
         # copy network to a tmp, redirect edges from activation state nodes 
         # Edge indicates the impact 
@@ -565,22 +593,24 @@ class PyGibbCAMP:
             if (self.network.node[u]['nodeObj'].type == 'ACTIVATIONSTATE'\
             or self.network.node[u]['nodeObj'].type == 'activeState')\
             and (self.network.node[v]['nodeObj'].type == 'PHOSPHORYLATIONSTATE'\
-            or self.network.node[v]['nodeObj'].type == 'phosState'):
-                
+            or self.network.node[v]['nodeObj'].type == 'phosState'):                
                 # extract parameters associated with u and v
                 vPreds = self.network.predecessors(v)
                 uIndx = vPreds.index(u)
                 vParams = np.sum(self.network.node[v]['nodeObj'].params, 0) 
                 if len(vParams) != (len(vPreds) + 1):
                     raise Exception ("Bug in retrieving parameters of node v " + u)
-                paramZeros = np.sum(self.network.node[v]['nodeObj'].params == 0, 0)
-                if np.float(paramZeros[uIndx+1]) / float(self.nChains) > .9:
-                    continue  # don't add edge with beta == 0
                     
                 for ab in self.dictProteinToAntibody[u]: 
                     if ab not in self.network:
                         continue
-                                       
+                    
+#                    # check the topology of proteins on an edge
+#                    if toposortedAntibodies.index(v) < toposortedAntibodies.index(ab):
+#                        tmp = ab
+#                        ab = v
+#                        v = tmp
+                        
                     if vParams[uIndx+1] > 0. :
                         tmpNet.add_edge(ab, v, effect = "+", betaValue = vParams[uIndx+1])
                     elif vParams[uIndx+1]  < 0. :
@@ -599,7 +629,14 @@ class PyGibbCAMP:
             
             for leaf in leafNodes:
                 tmpNet.remove_node(leaf)
-        
+        # remove cycle between two proteins
+        for u, v in tmpNet.edges():
+            if tmpNet.has_edge(u, v) and tmpNet.has_edge(v, u):
+                if abs(tmpNet.edge[u][v]['betaValue']) > abs(tmpNet.edge[v][u]['betaValue']):
+                    tmpNet.remove_edge(v, u)
+                else:
+                    tmpNet.remove_edge(u, v)
+                    
         # now try to remove cycles and make the tmpNet a DAG
         return tmpNet
             
